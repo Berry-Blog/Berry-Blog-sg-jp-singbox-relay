@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-REPO_RAW="https://raw.githubusercontent.com/Berry-Blog/Berry-Blog-sg-jp-singbox-relay/main"
+REPO_API="https://api.github.com/repos/Berry-Blog/Berry-Blog-sg-jp-singbox-relay/contents"
 CONFIG_DIR="/etc/sing-box"
 DATA_FILE="$CONFIG_DIR/relay.json"
 CONFIG_FILE="$CONFIG_DIR/config.json"
@@ -190,15 +190,17 @@ show_ss_japan_snippet(){
   local pass method
   pass="$(get jp_ss_password)"; method="$(get jp_ss_method)"
   [[ -n "$pass" ]] || die "SS credentials have not been generated. Select SS mode first."
+  [[ -n "$(get jp_ss_listen_address)" ]] || die "Japan SS listen address is not configured."
+  valid_port "$(get jp_ss_listen_port)" || die "Japan SS listen port is not configured."
   cat <<EOF
 Append this inbound object to the Japan BIGLOBE /etc/sing-box/config.json inbounds array.
-Add provider mapping: public TCP $(get jp_ss_port) -> 10.88.204.79:8388.
+Add provider mapping: public TCP $(get jp_ss_port) -> $(get jp_ss_listen_address):$(get jp_ss_listen_port).
 
 {
   "type": "shadowsocks",
   "tag": "jp-ss-in",
-  "listen": "10.88.204.79",
-  "listen_port": 8388,
+  "listen": "$(get jp_ss_listen_address)",
+  "listen_port": $(get jp_ss_listen_port),
   "network": "tcp",
   "method": "$method",
   "password": "$pass"
@@ -206,7 +208,7 @@ Add provider mapping: public TCP $(get jp_ss_port) -> 10.88.204.79:8388.
 EOF
 }
 switch_mode(){
-  local choice port method pass
+  local choice port listen_address listen_port method pass
   echo "1) Reality -> Reality (baseline)"
   echo "2) Reality -> Shadowsocks (Japan SS inbound and port mapping required)"
   read -r -p "Select [1]: " choice
@@ -218,8 +220,12 @@ switch_mode(){
       finish_change
       ;;
     2)
-      port="$(ask_value 'Japan SS public port (mapped to internal 8388/TCP)' "$(get jp_ss_port)")"
-      valid_port "$port" || die "Invalid SS port."
+      read -r -p "Japan SS public TCP port (provider mapping): " port
+      valid_port "$port" || die "Invalid SS public port."
+      read -r -p "Japan SS internal listen address (read from Japan SSH ip addr): " listen_address
+      valid_host "$listen_address" || die "Invalid Japan SS listen address."
+      read -r -p "Japan SS internal listen port: " listen_port
+      valid_port "$listen_port" || die "Invalid Japan SS listen port."
       method="$(ask_value 'SS method' "$(get jp_ss_method)")"
       case "$method" in
         2022-blake3-aes-128-gcm)
@@ -234,6 +240,8 @@ switch_mode(){
       esac
       begin_change before-mode-ss
       set_number jp_ss_port "$port"
+      set_string jp_ss_listen_address "$listen_address"
+      set_number jp_ss_listen_port "$listen_port"
       set_string jp_ss_method "$method"
       set_string jp_ss_password "$pass"
       set_string mode ss
@@ -267,13 +275,13 @@ setup(){
   mkdir -p "$CONFIG_DIR" "$BACKUP_ROOT"; chmod 700 "$CONFIG_DIR" "$BACKUP_ROOT"
   local public_host public_port listen_address listen_port inbound_sni jp_host jp_port jp_uuid jp_public jp_short jp_sni
   local keys private public sid uuid
-  public_host="$(ask_value 'Singapore public IP/domain' '178.94.15.19')"
-  public_port="$(ask_value 'Singapore public mapped TCP port' '30010')"
+  public_host="$(ask_value 'Singapore public IP/domain' '')"
+  public_port="$(ask_value 'Singapore public mapped TCP port' '')"
   listen_address="$(ask_value 'Singapore listen address' '0.0.0.0')"
-  listen_port="$(ask_value 'Singapore internal listen port' '10010')"
+  listen_port="$(ask_value 'Singapore internal listen port' '')"
   inbound_sni="$(ask_value 'Singapore Reality SNI/handshake domain' 'addons.mozilla.org')"
-  jp_host="$(ask_value 'Japan BIGLOBE public endpoint' '167.254.242.31')"
-  jp_port="$(ask_value 'Japan BIGLOBE Reality public port' '30001')"
+  jp_host="$(ask_value 'Japan BIGLOBE public endpoint' '')"
+  jp_port="$(ask_value 'Japan BIGLOBE Reality public port' '')"
   jp_sni="$(ask_value 'Japan Reality SNI' 'addons.mozilla.org')"
   valid_host "$public_host" && valid_port "$public_port" && valid_host "$listen_address" && valid_port "$listen_port" || die "Invalid Singapore endpoint/port."
   valid_host "$inbound_sni" && valid_host "$jp_host" && valid_port "$jp_port" && valid_host "$jp_sni" || die "Invalid SNI/Japan endpoint."
@@ -307,7 +315,7 @@ setup(){
       inbound_sni:$inbound_sni,inbound_handshake:$inbound_handshake,
       jp_host:$jp_host,jp_port:$jp_port,jp_uuid:$jp_uuid,
       jp_public_key:$jp_public_key,jp_short_id:$jp_short_id,jp_sni:$jp_sni,
-      jp_ss_port:30003,jp_ss_method:"2022-blake3-aes-128-gcm",jp_ss_password:""
+      jp_ss_port:0,jp_ss_listen_address:"",jp_ss_listen_port:0,jp_ss_method:"2022-blake3-aes-128-gcm",jp_ss_password:""
     }' > "$DATA_FILE"
   chmod 600 "$DATA_FILE"
   render_config > "$CONFIG_FILE.tmp"; chmod 600 "$CONFIG_FILE.tmp"
@@ -397,8 +405,19 @@ update_core(){
   rm -rf "$tmp"; ok "Updated: $("$BIN" version | head -n1)"
 }
 update_manager(){
-  local tmp; tmp="$(mktemp)"
-  curl -fsSL "$REPO_RAW/sb" -o "$tmp"
+  local tmp token
+  tmp="$(mktemp)"
+  token="\${GH_TOKEN:-}"
+  if [[ -z "$token" ]]; then
+    read -r -s -p "GitHub fine-grained token (Contents: Read-only): " token </dev/tty
+    printf '\n' >/dev/tty
+  fi
+  [[ -n "$token" ]] || die "A GitHub token is required for this private repository."
+  if ! curl -fsSL -H "Authorization: Bearer $token" -H "Accept: application/vnd.github.raw" \
+    "$REPO_API/sb?ref=main" -o "$tmp"; then
+    rm -f "$tmp"; die "Unable to download manager from GitHub."
+  fi
+  unset token
   bash -n "$tmp"
   install -m 0755 "$tmp" /usr/local/bin/sb
   rm -f "$tmp"; ok "sb manager updated."
