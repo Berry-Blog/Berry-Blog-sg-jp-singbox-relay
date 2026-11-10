@@ -20,9 +20,29 @@ die(){ printf '[ERROR] %s\n' "$*" >&2; exit 1; }
 [[ "${ID:-}" == "alpine" ]] || die "当前版本仅支持 Alpine Linux。"
 [[ "$(uname -m)" == "x86_64" ]] || die "当前版本仅支持 x86_64。"
 command -v rc-service >/dev/null 2>&1 || die "未检测到 OpenRC。"
+
+info "安装获取私有仓库文件所需的依赖..."
+apk add --no-cache bash curl ca-certificates jq openssl tar coreutils
+
+TMP="$(mktemp -d /tmp/sg-jp-relay.XXXXXX)"
+trap 'rm -rf "$TMP"' EXIT
+
+GH_TOKEN="\${GH_TOKEN:-}"
+if [[ -z "$GH_TOKEN" ]]; then
+  read -r -s -p "GitHub fine-grained token (this repo: Contents Read-only): " GH_TOKEN </dev/tty
+  printf '\n' >/dev/tty
+fi
+[[ -n "$GH_TOKEN" ]] || die "私有仓库需要 GitHub 只读 Token。"
+
+info "验证仓库访问并预取管理脚本..."
+curl -fsSL \
+  -H "Authorization: Bearer $GH_TOKEN" \
+  -H "Accept: application/vnd.github.raw" \
+  "https://api.github.com/repos/$REPO/contents/sb?ref=main" \
+  -o "$TMP/sb" || die "无法读取私有仓库中的 sb 文件，请检查 Token 权限。"
+bash -n "$TMP/sb" || die "GitHub 中的 sb 管理脚本语法检查失败。"
 FREE_MB="$(df -Pm / | awk 'NR==2 {print $4}')"
 [[ "$FREE_MB" =~ ^[0-9]+$ ]] && (( FREE_MB >= 120 )) || die "根分区可用空间不足 120MB。"
-if netstat -lnt 2>/dev/null | grep -Eq "[:.]10010[[:space:]]"; then die "TCP 10010 已被监听；请先确认端口占用，未执行清理。"; fi
 
 echo "================================================"
 echo " SG-JP sing-box Relay 一键部署"
@@ -71,12 +91,6 @@ rm -rf "$CONFIG_DIR"
 rm -f "$BIN" /usr/bin/sing-box /usr/local/bin/sb /usr/bin/sb
 rm -f /root/deploy-sg-reality.sh /root/finish-sg-reality.sh
 
-info "安装必要依赖..."
-apk add --no-cache bash curl ca-certificates jq openssl tar coreutils
-
-TMP="$(mktemp -d /tmp/sg-jp-relay.XXXXXX)"
-trap 'rm -rf "$TMP"' EXIT
-
 info "下载官方 sing-box ${VERSION}..."
 curl -fL --retry 3 --connect-timeout 20 -o "$TMP/$ASSET" "$URL"
 printf '%s  %s\n' "$SHA256" "$TMP/$ASSET" | sha256sum -c -
@@ -91,8 +105,6 @@ mkdir -p "$CONFIG_DIR"
 chmod 700 "$CONFIG_DIR"
 
 info "安装 sb 管理命令..."
-curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/sb" -o "$TMP/sb"
-bash -n "$TMP/sb"
 install -m 0755 "$TMP/sb" /usr/local/bin/sb
 ln -sf /usr/local/bin/sb /usr/bin/sb
 
