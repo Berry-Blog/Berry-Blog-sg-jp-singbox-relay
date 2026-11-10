@@ -1,95 +1,92 @@
-# SG-JP sing-box Relay
+# SG-JP sing-box 双节点中转管理
 
-新加坡线路机与日本家宽落地机之间的轻量 sing-box 管理工具。
+为新加坡 GoMami 线路机与日本 BIGLOBE 家宽落地机设计的轻量管理脚本。基于 sing-box 1.13.21，支持双 VLESS Reality 节点、Clash Meta/Mihomo 配置导出、备份恢复和中文菜单。
 
-## Architecture
+## 双节点工作方式
 
-\`\`\`
-Client
-  -> Singapore VLESS Reality inbound
-  -> Singapore VLESS Reality outbound
-  -> Japan BIGLOBE VLESS Reality inbound
-  -> Japan BIGLOBE direct outbound
-\`\`\`
+两个客户端节点共用新加坡同一个 Reality 监听地址和端口，通过不同的 VLESS UUID 用户名路由：
 
-## Supported environment
+- **节点 A：新加坡直出**。VLESS 用户名为 \`sg-direct\`，流量由新加坡机器直接出站。
+- **节点 B：新加坡 → 日本 BIGLOBE**。VLESS 用户名为 \`sg-via-jp\`，流量继续使用现有日本 Reality（或后续配置的 SS）出站。
 
-- Alpine Linux x86_64
-- OpenRC
-- sing-box 1.13.21 (official musl build)
+路由使用 sing-box 的 VLESS 用户 \`name\` 与 route \`auth_user\` 匹配。新增节点不会重新生成或替换现有日本中转节点的 UUID、Reality 私钥、公钥和 Short ID。
 
-## One-line installation
+## 一键安装
 
-仓库保持 Public，可直接通过 curl 获取安装器。在新加坡服务器 SSH 中以 root 执行：
+仅支持 Alpine Linux x86_64 + OpenRC：
 
 \`\`\`sh
 apk add --no-cache bash curl && bash -c "$(curl -fsSL https://raw.githubusercontent.com/Berry-Blog/Berry-Blog-sg-jp-singbox-relay/main/install.sh)"
 \`\`\`
 
-### Optional legacy cleanup
+安装器检测到旧 sing-box 文件时会询问是否清理。清理为可选项；不会删除 SSH、系统网络配置或历史备份。首次配置时服务器 IP/域名由管理员输入，端口可直接回车采用默认值，也可以输入自定义端口。
 
-如果检测到旧 sing-box 文件，安装器会询问是否清理：
+## 已部署机器升级
 
-- 输入 \`Y\` 或直接回车：停止旧服务，删除旧 sing-box 配置目录、服务文件、核心程序及旧管理命令；**不备份旧安装**。
-- 输入 \`N\`：不触碰旧配置和服务，并取消本次安装，避免覆盖旧服务。
+如果机器已经安装旧版管理脚本，不要重新安装核心，也不要重新运行安装器。
 
-清理不会删除 \`/root\` 下已有的历史备份，也不会修改 SSH、系统网络配置或日本 BIGLOBE。若没有检测到旧安装，则跳过清理询问。
+1. SSH 登录新加坡服务器。
+2. 输入 \`sb\`。
+3. 在旧版菜单中选择“更新 sb 管理脚本”（旧菜单编号 27）。
+4. 脚本从本 Public 仓库下载新版、先执行 \`bash -n\` 检查，再自动重新载入中文菜单。
+5. 在新版菜单选择“应用/修复双节点路由配置”（编号 9）。
 
-## First setup
+更新管理脚本本身不会立即改变正在运行的 sing-box 配置。必须主动选择菜单 9 才会应用双节点配置。应用前会自动备份当前参数和配置；校验或重启失败会回滚。
 
-首次安装会提示输入服务器 IP/域名（不预填任何实际 IP）：
+也可以在服务器上执行 \`sb update\` 更新管理脚本。
 
-- Singapore public IP/domain: 必须手动输入
-- Singapore public mapped TCP port: 默认 \`30010\`，可输入自定义端口
-- Singapore internal listen address: 默认 \`0.0.0.0\`
-- Singapore internal listen port: 默认 \`10010\`，可输入自定义端口
-- Singapore Reality SNI: 默认 \`addons.mozilla.org\`
-- Japan BIGLOBE public IP/domain: 必须手动输入
-- Japan Reality public TCP port: 默认 \`30001\`，可输入自定义端口
-- Japan Reality SNI: 默认 \`addons.mozilla.org\`
-- Japan VLESS UUID
-- Japan Reality Public Key
-- Japan Reality Short ID
+## 中文菜单功能
 
-端口提示处直接回车使用默认值，输入 1-65535 的数字即可使用自定义端口。修改内部监听端口后，必须同步修改商家端口映射。新加坡 Reality 凭据由 sing-box 在本机生成。所有服务器 IP、认证凭据均只保存在服务器本地 root-only 文件，不会写入公开仓库。
+- 查看双节点状态与参数
+- 明文显示新加坡、日本两侧 UUID、Reality Private/Public Key、Short ID
+- 生成两个独立 VLESS Reality 一键导入链接
+- 生成 Clash Meta / Mihomo YAML 配置文件
+- 启用本机 Clash 订阅文件服务并生成 HTTPS 订阅地址
+- 修改新加坡/日本 IP、端口、UUID、Public Key、Short ID、SNI
+- 单独重新生成新加坡直出 UUID
+- 轮换新加坡 Reality 密钥
+- Reality / Shadowsocks 日本出站切换
+- 配置校验、服务启停、日志、备份恢复、核心更新和卸载
 
-## Management
+## 导出文件
 
-首次配置完成后，登录新加坡服务器直接运行：
+应用双节点配置后，执行 \`sb\`：
 
-\`\`\`sh
-sb
-\`\`\`
+- 菜单 3：显示两个 VLESS 分享链接，保存在 \`/etc/sing-box/export/vless.txt\`
+- 菜单 4：生成 Clash Meta/Mihomo 配置，保存在 \`/etc/sing-box/export/clash.yaml\`
 
-不需要执行 \`sh sb\`。菜单支持查看节点、生成客户端链接、修改端点和端口、修改 UUID/Reality 参数、切换 Reality 或 Shadowsocks 出站、配置检查、服务启停、日志、备份恢复、更新和卸载。
+Clash YAML 内含两个代理节点和一个手动选择策略组，可通过 SCP 下载后在 Clash Meta / Mihomo 中从文件导入。
 
-管理脚本更新也直接从 Public GitHub 仓库 curl 拉取，不需要 Token。
+## Clash 远程订阅地址
 
-## Default port values
+菜单 5 可以启用一个轻量本机静态文件服务：
 
-| Purpose | Default | Custom |
-|---|---:|---|
-| Singapore public TCP mapping | \`30010\` | Yes |
-| Singapore internal VLESS listener | \`10010\` | Yes |
-| Japan Reality public TCP mapping | \`30001\` | Yes |
-| Optional Japan SS public TCP mapping | \`30003\` | Yes |
-| Optional Japan SS internal listener | \`8388\` | Yes |
+- 默认仅监听 \`127.0.0.1:18080\`，不直接开放公网端口
+- 生成随机长令牌路径，订阅文件不放在公开仓库
+- 要获得可用的远程订阅 URL，需自行将 HTTPS 域名、Cloudflare Tunnel 或 HTTPS 反向代理转发到脚本显示的本机上游地址
+- 订阅 URL 包含随机访问令牌，等同于节点凭据；不要公开分享
+- 脚本不会擅自增加商家公网端口映射，也不会自动替用户创建 DNS、证书或 Cloudflare Tunnel
 
-## Important
+如果尚未配置 HTTPS 反向代理，可先使用本地 Clash YAML 文件导入，不要把含节点凭据的 YAML 放在公开 GitHub 仓库或通过明文 HTTP 公开传输。
 
-- 首次部署默认启用 Reality -> Reality。
-- 所有代理流量通过 sing-box \`route.final\` 固定发往日本 outbound，不配置新加坡 Direct fallback。
-- 当前默认仅配置 TCP。
-- 修改端口时，管理器会提示同步更新运营商/商家端口映射；映射需要在商家面板单独调整。
-- 修改日本 UUID/Public Key/Short ID 时，必须确保日本 BIGLOBE 的 Reality inbound 凭据匹配。
-- Reality -> SS 模式仅生成日本 SS 入站配置片段；切换前必须先在日本增加 SS inbound，并由管理员配置相应 TCP 端口映射。此管理器不会远程修改日本机器。
-- SS mode is a later A/B test, not enabled by default.
-- Keep local backups private; they contain authentication secrets.
+## 安全说明
 
-## Local files
+- 公开仓库只保存通用脚本，不保存真实服务器 IP、UUID、Reality 密钥、Short ID 或订阅令牌。
+- 本地参数文件 \`/etc/sing-box/relay.json\` 权限为 root-only（600）。
+- 用户明确要求凭据在 SSH 终端明文显示；菜单 2 会展示完整参数。请不要在公开录屏、截图或聊天中暴露这些内容。
+- 当前节点端口映射为 TCP；Clash 配置按 TCP Reality 生成，不宣称已启用 UDP。
+- 修改端口后，需要在商家面板同步修改端口映射。
+- 修改日本落地 UUID/Public Key/Short ID 后，必须与日本 BIGLOBE 实际入站配置一致。此脚本只管理新加坡机器，不会远程修改日本服务器。
 
-- \`/etc/sing-box/relay.json\`: root-only parameters and credentials
-- \`/etc/sing-box/config.json\`: generated runtime config
-- \`/etc/sing-box/uris.txt\`: client URI, root-only
-- \`/root/sb-relay-backups/\`: timestamped configuration backups created by the manager
-- \`/usr/local/bin/sb\`: interactive manager
+## 本地文件
+
+- \`/etc/sing-box/relay.json\`：本地参数及认证凭据（600）
+- \`/etc/sing-box/config.json\`：sing-box 运行配置（600）
+- \`/etc/sing-box/export/vless.txt\`：两个 VLESS 分享链接（600）
+- \`/etc/sing-box/export/clash.yaml\`：Clash Meta/Mihomo 配置（600）
+- \`/root/sb-relay-backups/\`：修改前自动备份
+- \`/usr/local/bin/sb\`：中文管理命令
+
+## 参考
+
+管理菜单和节点导出体验参考 [yonggekkk/sing-box-yg](https://github.com/yonggekkk/sing-box-yg)；双节点路由和参数管理为本项目按 SG-JP 架构定制。
