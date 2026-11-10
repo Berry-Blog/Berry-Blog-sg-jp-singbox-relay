@@ -28,18 +28,26 @@ TMP="$(mktemp -d /tmp/sg-jp-relay.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 GH_TOKEN="\${GH_TOKEN:-}"
-if [[ -z "$GH_TOKEN" ]]; then
-  read -r -s -p "GitHub fine-grained token (this repo: Contents Read-only): " GH_TOKEN </dev/tty
-  printf '\n' >/dev/tty
-fi
-[[ -n "$GH_TOKEN" ]] || die "私有仓库需要 GitHub 只读 Token。"
-
 info "验证仓库访问并预取管理脚本..."
-curl -fsSL \
-  -H "Authorization: Bearer $GH_TOKEN" \
-  -H "Accept: application/vnd.github.raw" \
-  "https://api.github.com/repos/$REPO/contents/sb?ref=main" \
-  -o "$TMP/sb" || die "无法读取私有仓库中的 sb 文件，请检查 Token 权限。"
+if [[ -n "$GH_TOKEN" ]]; then
+  curl -fsSL \
+    -H "Authorization: Bearer $GH_TOKEN" \
+    -H "Accept: application/vnd.github.raw" \
+    "https://api.github.com/repos/$REPO/contents/sb?ref=main" \
+    -o "$TMP/sb" || die "无法读取仓库中的 sb 文件，请检查 Token 权限。"
+else
+  if ! curl -fsSL -H "Accept: application/vnd.github.raw" \
+    "https://api.github.com/repos/$REPO/contents/sb?ref=main" -o "$TMP/sb"; then
+    read -r -s -p "GitHub fine-grained token (this repo: Contents Read-only): " GH_TOKEN </dev/tty
+    printf '\n' >/dev/tty
+    [[ -n "$GH_TOKEN" ]] || die "私有仓库需要 GitHub 只读 Token。"
+    curl -fsSL \
+      -H "Authorization: Bearer $GH_TOKEN" \
+      -H "Accept: application/vnd.github.raw" \
+      "https://api.github.com/repos/$REPO/contents/sb?ref=main" \
+      -o "$TMP/sb" || die "无法读取私有仓库中的 sb 文件，请检查 Token 权限。"
+  fi
+fi
 bash -n "$TMP/sb" || die "GitHub 中的 sb 管理脚本语法检查失败。"
 FREE_MB="$(df -Pm / | awk 'NR==2 {print $4}')"
 [[ "$FREE_MB" =~ ^[0-9]+$ ]] && (( FREE_MB >= 120 )) || die "根分区可用空间不足 120MB。"
