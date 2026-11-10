@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+
 REPO="Berry-Blog/Berry-Blog-sg-jp-singbox-relay"
 VERSION="1.13.21"
 ASSET="sing-box-${VERSION}-linux-amd64-musl.tar.gz"
@@ -7,6 +8,7 @@ URL="https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/${ASSET}
 SHA256="8864abb3b72a6b404445a8c25183c79cfa44a80def0d775ac79578e74fb980e7"
 CONFIG_DIR="/etc/sing-box"
 SERVICE="/etc/init.d/sing-box"
+CONF_FILE="/etc/conf.d/sing-box"
 BIN="/usr/local/bin/sing-box"
 
 info(){ printf '[INFO] %s\n' "$*"; }
@@ -19,50 +21,83 @@ die(){ printf '[ERROR] %s\n' "$*" >&2; exit 1; }
 [[ "${ID:-}" == "alpine" ]] || die "当前版本仅支持 Alpine Linux。"
 [[ "$(uname -m)" == "x86_64" ]] || die "当前版本仅支持 x86_64。"
 command -v rc-service >/dev/null 2>&1 || die "未检测到 OpenRC。"
+
 FREE_MB="$(df -Pm / | awk 'NR==2 {print $4}')"
 [[ "$FREE_MB" =~ ^[0-9]+$ ]] && (( FREE_MB >= 120 )) || die "根分区可用空间不足 120MB。"
-
-info "安装依赖..."
-apk add --no-cache bash curl ca-certificates jq openssl tar coreutils net-tools
 
 TMP="$(mktemp -d /tmp/sg-jp-relay.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
-info "从公开 GitHub 仓库获取 sb 管理脚本..."
+info "从公开 GitHub 仓库获取管理脚本..."
 curl -fsSL --retry 3 \
-  "https://raw.githubusercontent.com/$REPO/main/sb" \
-  -o "$TMP/sb" || die "无法从公开仓库下载 sb 管理脚本。"
-bash -n "$TMP/sb" || die "GitHub 中的 sb 管理脚本语法检查失败。"
-
-if [[ -s "$CONFIG_DIR/config.json" || -s "$CONFIG_DIR/relay.json" ]]; then
-  die "发现现有 sing-box 配置。为避免删除有效配置，安装器停止；请先使用 sb 卸载或手动确认。"
-fi
+  "https://raw.githubusercontent.com/${REPO}/main/sb" \
+  -o "$TMP/sb" || die "无法下载 sb 管理脚本。"
+bash -n "$TMP/sb" || die "sb 管理脚本 Bash 语法检查失败。"
 
 echo "================================================"
 echo " SG-JP sing-box Relay 一键部署"
-echo " Alpine 3.23 / sing-box ${VERSION}"
+echo " Alpine Linux x86_64 / sing-box ${VERSION}"
 echo "================================================"
-echo "此安装器不会备份已知的旧半成品安装。"
-echo "确认后将停止并清理已知的 sing-box 二进制、服务文件和旧部署脚本，再安装官方核心与 sb 管理菜单。"
-echo "不会连接或修改日本 BIGLOBE，不会删除 SSH、系统网络配置或历史备份。"
+echo "清理旧 sing-box 配置是可选操作。"
+echo "选择清理：停止旧服务并删除旧 sing-box 配置、服务文件和核心程序；不备份旧安装。"
+echo "选择保留：不触碰旧配置和服务，并取消本次安装，避免覆盖正在运行的节点。"
+echo "无论选择哪项，都不会删除 SSH、系统网络配置或历史备份。"
 echo
-read -r -p "确认继续？输入 YES: " confirm
-[[ "$confirm" == "YES" ]] || die "用户取消。"
 
-info "停止并移除旧 sing-box 服务..."
-rc-service sing-box stop 2>/dev/null || true
-rc-update del sing-box default 2>/dev/null || true
-rm -f "$SERVICE"
+HAS_OLD=0
+[[ ! -d "$CONFIG_DIR" ]] || HAS_OLD=1
+[[ ! -e "$SERVICE" ]] || HAS_OLD=1
+[[ ! -e "$CONF_FILE" ]] || HAS_OLD=1
+[[ ! -e "$BIN" ]] || HAS_OLD=1
+[[ ! -e /usr/bin/sing-box ]] || HAS_OLD=1
+[[ ! -e /usr/local/bin/sb ]] || HAS_OLD=1
+[[ ! -e /usr/bin/sb ]] || HAS_OLD=1
 if command -v apk >/dev/null 2>&1 && apk info -e sing-box >/dev/null 2>&1; then
-  apk del sing-box || warn "apk del sing-box 未成功；继续使用官方独立二进制安装。"
+  HAS_OLD=1
 fi
 
-# 只清理本项目已知的半成品路径。
-rm -f "$BIN" /usr/bin/sing-box /usr/local/bin/sb /usr/bin/sb
-rm -f /root/deploy-sg-reality.sh /root/finish-sg-reality.sh
-rmdir "$CONFIG_DIR" 2>/dev/null || true
+if (( HAS_OLD )); then
+  echo "检测到已有 sing-box 相关文件："
+  [[ ! -d "$CONFIG_DIR" ]] || echo "  - ${CONFIG_DIR}/（旧配置目录）"
+  [[ ! -e "$SERVICE" ]] || echo "  - ${SERVICE}（OpenRC 服务）"
+  [[ ! -e "$CONF_FILE" ]] || echo "  - ${CONF_FILE}（服务参数）"
+  [[ ! -e "$BIN" ]] || echo "  - ${BIN}（核心程序）"
+  [[ ! -e /usr/bin/sing-box ]] || echo "  - /usr/bin/sing-box"
+  [[ ! -e /usr/local/bin/sb ]] || echo "  - /usr/local/bin/sb（管理命令）"
+  [[ ! -e /usr/bin/sb ]] || echo "  - /usr/bin/sb（管理命令链接）"
+  echo
+  read -r -p "是否清理上述旧 sing-box 文件？[Y/n]: " CLEAN_OLD
+  CLEAN_OLD="${CLEAN_OLD:-Y}"
+  case "$CLEAN_OLD" in
+    Y|y|YES|yes)
+      info "按选择清理旧 sing-box 安装（不创建旧安装备份）..."
+      rc-service sing-box stop 2>/dev/null || true
+      rc-update del sing-box default 2>/dev/null || true
+      rm -f "$SERVICE" "$CONF_FILE"
+      if command -v apk >/dev/null 2>&1 && apk info -e sing-box >/dev/null 2>&1; then
+        apk del sing-box || warn "apk del sing-box 未成功，将继续清理已知文件。"
+      fi
+      rm -rf "$CONFIG_DIR"
+      rm -f "$BIN" /usr/bin/sing-box /usr/local/bin/sb /usr/bin/sb
+      rm -f /var/log/sing-box.log /var/log/sing-box.err
+      rm -f /root/deploy-sg-reality.sh /root/finish-sg-reality.sh
+      ok "旧 sing-box 文件已清理；历史备份目录未删除。"
+      ;;
+    N|n|NO|no)
+      die "你选择保留旧配置。为避免覆盖旧服务，本次安装已取消，服务器未清理旧文件。"
+      ;;
+    *)
+      die "无效选项，请输入 Y 或 N；本次未清理旧文件。"
+      ;;
+  esac
+else
+  info "未发现旧 sing-box 安装，无需清理。"
+fi
 
-info "下载官方 sing-box ${VERSION}..."
+info "安装依赖..."
+apk add --no-cache bash curl ca-certificates jq openssl tar coreutils net-tools
+
+info "下载官方 sing-box ${VERSION} musl amd64..."
 curl -fL --retry 3 --connect-timeout 20 -o "$TMP/$ASSET" "$URL"
 printf '%s  %s\n' "$SHA256" "$TMP/$ASSET" | sha256sum -c -
 
@@ -85,6 +120,7 @@ info "进入首次配置..."
 info "检查服务状态..."
 rc-service sing-box status
 "$BIN" check -c "$CONFIG_DIR/config.json"
+
 echo
 echo "================================================"
 echo "部署完成"
