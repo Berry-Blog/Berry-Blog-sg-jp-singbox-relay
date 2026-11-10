@@ -20,6 +20,9 @@ die(){ printf '[ERROR] %s\n' "$*" >&2; exit 1; }
 [[ "${ID:-}" == "alpine" ]] || die "当前版本仅支持 Alpine Linux。"
 [[ "$(uname -m)" == "x86_64" ]] || die "当前版本仅支持 x86_64。"
 command -v rc-service >/dev/null 2>&1 || die "未检测到 OpenRC。"
+FREE_MB="$(df -Pm / | awk 'NR==2 {print $4}')"
+[[ "$FREE_MB" =~ ^[0-9]+$ ]] && (( FREE_MB >= 120 )) || die "根分区可用空间不足 120MB。"
+if netstat -lnt 2>/dev/null | grep -Eq "[:.]10010[[:space:]]"; then die "TCP 10010 已被监听；请先确认端口占用，未执行清理。"; fi
 
 echo "================================================"
 echo " SG-JP sing-box Relay 一键部署"
