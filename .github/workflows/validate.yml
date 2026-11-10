@@ -1,4 +1,4 @@
-name: Validate shell scripts
+name: Validate scripts and sing-box config
 
 on:
   push:
@@ -7,11 +7,35 @@ on:
     branches: [main]
 
 jobs:
-  bash-syntax:
+  bash-and-config:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Check Bash syntax
         run: |
           bash -n install.sh
           bash -n sb
+          bash -n tests/test-config.sh
+
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Download official sing-box 1.13.21
+        run: |
+          mkdir -p /tmp/sing-box-test
+          curl -fL --retry 3 \
+            https://github.com/SagerNet/sing-box/releases/download/v1.13.21/sing-box-1.13.21-linux-amd64-glibc.tar.gz \
+            -o /tmp/sing-box.tar.gz
+          echo "ab8c8b38665612a62856ac52f2393098c4b78ba8c91a055a722e849c681c745a  /tmp/sing-box.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/sing-box.tar.gz -C /tmp/sing-box-test
+          BIN="$(find /tmp/sing-box-test -type f -name sing-box | head -n 1)"
+          test -n "$BIN"
+          sudo install -m 0755 "$BIN" /usr/local/bin/sing-box
+          sing-box version
+
+      - name: Validate dual Reality route configuration
+        run: |
+          bash tests/test-config.sh
