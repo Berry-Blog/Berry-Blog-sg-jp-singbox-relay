@@ -5,7 +5,6 @@ VERSION="1.13.21"
 ASSET="sing-box-${VERSION}-linux-amd64-musl.tar.gz"
 URL="https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/${ASSET}"
 SHA256="8864abb3b72a6b404445a8c25183c79cfa44a80def0d775ac79578e74fb980e7"
-BACKUP_ROOT="/root/sb-relay-backups"
 CONFIG_DIR="/etc/sing-box"
 SERVICE="/etc/init.d/sing-box"
 BIN="/usr/local/bin/sing-box"
@@ -21,70 +20,34 @@ die(){ printf '[ERROR] %s\n' "$*" >&2; exit 1; }
 [[ "$(uname -m)" == "x86_64" ]] || die "当前版本仅支持 x86_64。"
 command -v rc-service >/dev/null 2>&1 || die "未检测到 OpenRC。"
 
-info "安装获取私有仓库文件所需的依赖..."
-apk add --no-cache bash curl ca-certificates jq openssl tar coreutils
+info "安装依赖..."
+apk add --no-cache bash curl ca-certificates jq openssl tar coreutils net-tools
 
 TMP="$(mktemp -d /tmp/sg-jp-relay.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
-GH_TOKEN="\${GH_TOKEN:-}"
-info "验证仓库访问并预取管理脚本..."
-if [[ -n "$GH_TOKEN" ]]; then
-  curl -fsSL \
-    -H "Authorization: Bearer $GH_TOKEN" \
-    -H "Accept: application/vnd.github.raw" \
-    "https://api.github.com/repos/$REPO/contents/sb?ref=main" \
-    -o "$TMP/sb" || die "无法读取仓库中的 sb 文件，请检查 Token 权限。"
-else
-  if ! curl -fsSL -H "Accept: application/vnd.github.raw" \
-    "https://api.github.com/repos/$REPO/contents/sb?ref=main" -o "$TMP/sb"; then
-    read -r -s -p "GitHub fine-grained token (this repo: Contents Read-only): " GH_TOKEN </dev/tty
-    printf '\n' >/dev/tty
-    [[ -n "$GH_TOKEN" ]] || die "私有仓库需要 GitHub 只读 Token。"
-    curl -fsSL \
-      -H "Authorization: Bearer $GH_TOKEN" \
-      -H "Accept: application/vnd.github.raw" \
-      "https://api.github.com/repos/$REPO/contents/sb?ref=main" \
-      -o "$TMP/sb" || die "无法读取私有仓库中的 sb 文件，请检查 Token 权限。"
-  fi
-fi
+info "从公开 GitHub 仓库获取 sb 管理脚本..."
+curl -fsSL --retry 3 \
+  "https://raw.githubusercontent.com/$REPO/main/sb" \
+  -o "$TMP/sb" || die "无法从公开仓库下载 sb 管理脚本。"
 bash -n "$TMP/sb" || die "GitHub 中的 sb 管理脚本语法检查失败。"
+
 FREE_MB="$(df -Pm / | awk 'NR==2 {print $4}')"
 [[ "$FREE_MB" =~ ^[0-9]+$ ]] && (( FREE_MB >= 120 )) || die "根分区可用空间不足 120MB。"
+if [[ -s "$CONFIG_DIR/config.json" || -s "$CONFIG_DIR/relay.json" ]]; then
+  die "发现现有 sing-box 配置。为避免删除有效配置，安装器停止；请先使用 sb 卸载或手动确认。"
+fi
 
 echo "================================================"
 echo " SG-JP sing-box Relay 一键部署"
 echo " Alpine 3.23 / sing-box ${VERSION}"
 echo "================================================"
-echo "此安装器将备份旧配置、停止并清理已知旧 sing-box 文件、安装官方核心和 sb 管理菜单。"
-echo "不会连接或修改日本 BIGLOBE，不会删除 SSH、系统网络配置及历史备份。"
+echo "此安装器不会备份已知的旧半成品安装。"
+echo "确认后将停止并清理已知的 sing-box 二进制、服务文件和旧部署脚本，再安装官方核心与 sb 管理菜单。"
+echo "不会连接或修改日本 BIGLOBE，不会删除 SSH、系统网络配置或历史备份。"
 echo
 read -r -p "确认继续？输入 YES: " confirm
 [[ "$confirm" == "YES" ]] || die "用户取消。"
-
-mkdir -p "$BACKUP_ROOT"
-chmod 700 "$BACKUP_ROOT"
-STAMP="$(date -u +%Y%m%d-%H%M%S)"
-BACKUP="$BACKUP_ROOT/legacy-$STAMP"
-mkdir -p "$BACKUP"
-chmod 700 "$BACKUP"
-
-info "备份旧安装..."
-[[ ! -d "$CONFIG_DIR" ]] || cp -a "$CONFIG_DIR" "$BACKUP/"
-[[ ! -f "$SERVICE" ]] || { mkdir -p "$BACKUP/etc/init.d"; cp -a "$SERVICE" "$BACKUP/etc/init.d/"; }
-[[ ! -f "$BIN" ]] || { mkdir -p "$BACKUP/usr/local/bin"; cp -a "$BIN" "$BACKUP/usr/local/bin/"; }
-[[ ! -f /usr/bin/sing-box ]] || { mkdir -p "$BACKUP/usr/bin"; cp -a /usr/bin/sing-box "$BACKUP/usr/bin/"; }
-{
-  cat /etc/os-release
-  uname -a
-  uptime
-  df -h
-  free -m 2>/dev/null || true
-  netstat -lntup 2>/dev/null || true
-} > "$BACKUP/system-state.txt" 2>&1
-tar -czf "$BACKUP.tar.gz" -C "$BACKUP_ROOT" "$(basename "$BACKUP")"
-chmod 600 "$BACKUP.tar.gz"
-echo "旧安装备份：$BACKUP.tar.gz"
 
 info "停止并移除旧 sing-box 服务..."
 rc-service sing-box stop 2>/dev/null || true
@@ -95,9 +58,9 @@ if command -v apk >/dev/null 2>&1 && apk info -e sing-box >/dev/null 2>&1; then
 fi
 
 # 只清理本项目已知的半成品路径。
-rm -rf "$CONFIG_DIR"
 rm -f "$BIN" /usr/bin/sing-box /usr/local/bin/sb /usr/bin/sb
 rm -f /root/deploy-sg-reality.sh /root/finish-sg-reality.sh
+rmdir "$CONFIG_DIR" 2>/dev/null || true
 
 info "下载官方 sing-box ${VERSION}..."
 curl -fL --retry 3 --connect-timeout 20 -o "$TMP/$ASSET" "$URL"
@@ -129,5 +92,4 @@ echo "管理菜单：sb"
 echo "状态检查：sb status"
 echo "配置校验：sb check"
 echo "客户端链接：sb node"
-echo "旧安装备份：$BACKUP.tar.gz"
 echo "================================================"
