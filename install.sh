@@ -2,8 +2,8 @@
 set -Eeuo pipefail
 REPO="Berry-Blog/Berry-Blog-sg-jp-singbox-relay"
 VERSION="1.13.21"
-ASSET="sing-box-\${VERSION}-linux-amd64-musl.tar.gz"
-URL="https://github.com/SagerNet/sing-box/releases/download/v\${VERSION}/\${ASSET}"
+ASSET="sing-box-${VERSION}-linux-amd64-musl.tar.gz"
+URL="https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/${ASSET}"
 SHA256="8864abb3b72a6b404445a8c25183c79cfa44a80def0d775ac79578e74fb980e7"
 BACKUP_ROOT="/root/sb-relay-backups"
 CONFIG_DIR="/etc/sing-box"
@@ -17,13 +17,13 @@ die(){ printf '[ERROR] %s\n' "$*" >&2; exit 1; }
 [[ "$(id -u)" -eq 0 ]] || die "请使用 root 用户执行。"
 [[ -r /etc/os-release ]] || die "无法识别操作系统。"
 . /etc/os-release
-[[ "\${ID:-}" == "alpine" ]] || die "当前版本仅支持 Alpine Linux。"
+[[ "${ID:-}" == "alpine" ]] || die "当前版本仅支持 Alpine Linux。"
 [[ "$(uname -m)" == "x86_64" ]] || die "当前版本仅支持 x86_64。"
 command -v rc-service >/dev/null 2>&1 || die "未检测到 OpenRC。"
 
 echo "================================================"
 echo " SG-JP sing-box Relay 一键部署"
-echo " Alpine 3.23 / sing-box \${VERSION}"
+echo " Alpine 3.23 / sing-box ${VERSION}"
 echo "================================================"
 echo "此安装器将备份旧配置、停止并清理已知旧 sing-box 文件、安装官方核心和 sb 管理菜单。"
 echo "不会连接或修改日本 BIGLOBE，不会删除 SSH、系统网络配置及历史备份。"
@@ -74,7 +74,7 @@ apk add --no-cache bash curl ca-certificates jq openssl tar coreutils
 TMP="$(mktemp -d /tmp/sg-jp-relay.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
-info "下载官方 sing-box \${VERSION}..."
+info "下载官方 sing-box ${VERSION}..."
 curl -fL --retry 3 --connect-timeout 20 -o "$TMP/$ASSET" "$URL"
 printf '%s  %s\n' "$SHA256" "$TMP/$ASSET" | sha256sum -c -
 
@@ -88,7 +88,7 @@ mkdir -p "$CONFIG_DIR"
 chmod 700 "$CONFIG_DIR"
 
 info "安装 sb 管理命令..."
-curl -fsSL "https://raw.githubusercontent.com/\${REPO}/main/sb" -o "$TMP/sb"
+curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/sb" -o "$TMP/sb"
 bash -n "$TMP/sb"
 install -m 0755 "$TMP/sb" /usr/local/bin/sb
 ln -sf /usr/local/bin/sb /usr/bin/sb
