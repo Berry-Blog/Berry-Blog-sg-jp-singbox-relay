@@ -342,7 +342,7 @@ start_pre() {
 OPENRC
   chmod 755 "$SERVICE_FILE"
   rc-update add sing-box default
-  rc-service sing-box start || { tail -n 60 /var/log/sing-box.err 2>/dev/null || true; die "Service start failed; backup and config retained."; }
+  rc-service sing-box start || { tail -n 60 /var/log/sing-box.err 2>/dev/null || true; die "Service start failed; generated config is retained, but this first install did not create a backup."; }
   write_uri
   ok "Reality -> Reality baseline configured."
   show_info
