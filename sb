@@ -331,6 +331,7 @@ show_credentials(){
 }
 show_links(){
   need_data
+  [[ -n "$(get direct_uuid)" ]] || die "请先选择菜单 9 应用双节点配置，再导出节点链接。"
   write_exports
   printf '\n========== VLESS 一键导入链接 ==========\n'
   sed -n '1,4p' "$URI_FILE"
@@ -339,6 +340,7 @@ show_links(){
 }
 show_clash(){
   need_data
+  [[ -n "$(get direct_uuid)" ]] || die "请先选择菜单 9 应用双节点配置，再导出 Clash 配置。"
   write_exports
   printf 'Clash Meta / Mihomo 配置已生成：%s\n' "$CLASH_FILE"
   printf '可通过 SCP 下载后，在 Clash Meta / Mihomo 中选择“从文件导入”。\n'
@@ -583,6 +585,7 @@ update_core(){
 }
 subscription_enable(){
   need_data
+  [[ -n "$(get direct_uuid)" ]] || die "请先选择菜单 9 应用双节点配置，再启用 Clash 订阅。"
   write_exports
   if ! busybox --list 2>/dev/null | grep -qx httpd; then
     info "正在安装 BusyBox HTTP 服务组件..."
@@ -591,6 +594,9 @@ subscription_enable(){
   busybox --list 2>/dev/null | grep -qx httpd || die "当前系统没有 BusyBox httpd，无法启用本地订阅服务。"
   local port base token
   port="$(ask_port '本地订阅服务监听端口' '18080')"
+  if netstat -lnt 2>/dev/null | awk -v p="$port" '$4 ~ (":" p "$") { found=1 } END { exit !found }'; then
+    die "本地订阅监听端口已被占用，请换一个端口。"
+  fi
   base="$(ask_value '外部 HTTPS 订阅域名基础地址（例如 https://sub.example.com）' '')"
   [[ "$base" == https://* ]] || die "为了保护节点凭据，公开订阅地址必须使用 HTTPS。"
   base="$(printf '%s' "$base" | sed 's:/*$::')"
@@ -779,8 +785,8 @@ menu(){
  7）重新生成订阅访问令牌
  8）关闭 Clash 订阅服务
  9）应用/修复双节点路由配置（保留现有日本节点）
-10）重新生成新加坡直出节点 UUID
-11）修改日本中转节点 UUID
+10）重新生成节点 A（新加坡直出）UUID
+11）修改节点 B（日本出口）客户端 UUID
 12）修改新加坡公网 IP/域名
 13）修改新加坡公网映射端口
 14）修改新加坡内部监听端口
@@ -788,17 +794,20 @@ menu(){
 16）修改日本 Reality 公网端口
 17）修改新加坡 Reality SNI
 18）修改日本 Reality SNI
-19）重新生成新加坡 Reality 密钥和 Short ID
-20）切换日本出站：Reality / Shadowsocks
-21）检查 sing-box 配置
-22）启动 / 停止 / 重启 sing-box
-23）查看服务状态、监听端口
-24）查看最近日志
-25）备份当前配置
-26）恢复历史备份
-27）更新 sb 管理脚本（从 GitHub 拉取最新版）
-28）更新 sing-box 核心
-29）卸载 sing-box
+19）修改日本落地 VLESS UUID
+20）修改日本落地 Reality Public Key
+21）修改日本落地 Reality Short ID
+22）重新生成新加坡 Reality 密钥和 Short ID
+23）切换日本出站：Reality / Shadowsocks
+24）检查 sing-box 配置
+25）启动 / 停止 / 重启 sing-box
+26）查看服务状态、监听端口
+27）查看最近日志
+28）备份当前配置
+29）恢复历史备份
+30）更新 sb 管理脚本（从 GitHub 拉取最新版）
+31）更新 sing-box 核心
+32）卸载 sing-box
  0）退出
 MENU
     echo
@@ -814,18 +823,21 @@ MENU
       8) subscription_disable ;;
       9) apply_dual_nodes ;;
       10) rotate_direct_uuid ;;
-      11) change_string inbound_uuid "日本中转节点 UUID" uuid ;;
+      11) change_string inbound_uuid "节点 B（日本出口）客户端 UUID" uuid ;;
       12) change_string public_host "新加坡公网 IP/域名" host ;;
       13) change_number public_port "新加坡公网映射端口" ;;
       14) change_number listen_port "新加坡内部监听端口" ;;
-      15) change_string jp_host "日本 BIGLOBE 公网 IP/域名" host ;;
+      15) change_string jp_host "日本 BIGLOBE IP/域名" host ;;
       16) change_number jp_port "日本 BIGLOBE Reality 公网端口" ;;
       17) change_sni ;;
       18) change_string jp_sni "日本 Reality SNI" host ;;
-      19) rotate_reality ;;
-      20) switch_mode ;;
-      21) config_check ;;
-      22)
+      19) change_string jp_uuid "日本落地 VLESS UUID" uuid ;;
+      20) change_string jp_public_key "日本落地 Reality Public Key" pubkey ;;
+      21) change_string jp_short_id "日本落地 Reality Short ID" short ;;
+      22) rotate_reality ;;
+      23) switch_mode ;;
+      24) config_check ;;
+      25)
         echo "1）启动  2）停止  3）重启"
         read -r -p "请选择： " action
         case "$action" in
@@ -835,19 +847,19 @@ MENU
           *) warn "无效选项。" ;;
         esac
         ;;
-      23) service_status ;;
-      24)
+      26) service_status ;;
+      27)
         echo "========== sing-box 错误日志 =========="
         tail -n 80 /var/log/sing-box.err 2>/dev/null || true
         echo
         echo "========== sing-box 运行日志 =========="
         tail -n 80 /var/log/sing-box.log 2>/dev/null || true
         ;;
-      25) backup_menu ;;
-      26) restore_menu ;;
-      27) update_manager ;;
-      28) update_core ;;
-      29)
+      28) backup_menu ;;
+      29) restore_menu ;;
+      30) update_manager ;;
+      31) update_core ;;
+      32)
         echo "1）卸载程序和服务，保留配置"
         echo "2）完全卸载程序、服务和配置（历史备份保留）"
         echo "0）取消"
