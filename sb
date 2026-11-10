@@ -1,0 +1,525 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+REPO_RAW="https://raw.githubusercontent.com/Berry-Blog/Berry-Blog-sg-jp-singbox-relay/main"
+CONFIG_DIR="/etc/sing-box"
+DATA_FILE="$CONFIG_DIR/relay.json"
+CONFIG_FILE="$CONFIG_DIR/config.json"
+URI_FILE="$CONFIG_DIR/uris.txt"
+BACKUP_ROOT="/root/sb-relay-backups"
+SERVICE_FILE="/etc/init.d/sing-box"
+BIN="/usr/local/bin/sing-box"
+
+info(){ printf '[INFO] %s\n' "$*"; }
+ok(){ printf '[ OK ] %s\n' "$*"; }
+warn(){ printf '[WARN] %s\n' "$*" >&2; }
+err(){ printf '[ERR ] %s\n' "$*" >&2; }
+die(){ err "$*"; exit 1; }
+need_root(){ [[ "$(id -u)" -eq 0 ]] || die "Run as root."; }
+need_data(){ [[ -s "$DATA_FILE" ]] || die "Not initialized. Run the installer first."; }
+get(){ jq -r --arg k "$1" '.[$k] // empty' "$DATA_FILE"; }
+valid_port(){ [[ "$1" =~ ^[0-9]+$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)); }
+valid_uuid(){ [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; }
+valid_short(){ [[ "$1" =~ ^([0-9a-fA-F]{2}){0,8}$ ]]; }
+valid_pubkey(){ [[ "$1" =~ ^[A-Za-z0-9_-]{43}$ ]]; }
+valid_host(){ [[ -n "$1" && "$1" != *[[:space:]]* && "$1" != *'/'* ]]; }
+
+ask_value(){
+  local prompt="$1" default="$2" value
+  read -r -p "$prompt [$default]: " value
+  if [[ -z "$value" ]]; then value="$default"; fi
+  printf '%s' "$value"
+}
+ask_secret(){
+  local prompt="$1" value
+  read -r -s -p "$prompt: " value
+  printf '\n' >&2
+  printf '%s' "$value"
+}
+backup_state(){
+  local label="manual" stamp dest
+  if [[ $# -gt 0 ]]; then label="$1"; fi
+  stamp="$(date -u +%Y%m%d-%H%M%S)"
+  dest="$BACKUP_ROOT/$stamp-$label"
+  mkdir -p "$dest"
+  chmod 700 "$BACKUP_ROOT" "$dest"
+  [[ ! -d "$CONFIG_DIR" ]] || cp -a "$CONFIG_DIR" "$dest/"
+  [[ ! -f "$SERVICE_FILE" ]] || { mkdir -p "$dest/etc/init.d"; cp -a "$SERVICE_FILE" "$dest/etc/init.d/"; }
+  [[ ! -f "$BIN" ]] || { mkdir -p "$dest/usr/local/bin"; cp -a "$BIN" "$dest/usr/local/bin/"; }
+  printf '%s\n' "$dest"
+}
+set_string(){
+  local key="$1" value="$2" tmp
+  tmp="$(mktemp "$CONFIG_DIR/relay.json.XXXXXX")"
+  jq --arg k "$key" --arg v "$value" '.[$k]=$v' "$DATA_FILE" > "$tmp"
+  chmod 600 "$tmp"; mv -f "$tmp" "$DATA_FILE"
+}
+set_number(){
+  local key="$1" value="$2" tmp
+  tmp="$(mktemp "$CONFIG_DIR/relay.json.XXXXXX")"
+  jq --arg k "$key" --argjson v "$value" '.[$k]=$v' "$DATA_FILE" > "$tmp"
+  chmod 600 "$tmp"; mv -f "$tmp" "$DATA_FILE"
+}
+render_config(){
+  need_data
+  jq -n \
+    --arg listen "$(get listen_address)" --argjson listen_port "$(get listen_port)" \
+    --arg in_uuid "$(get inbound_uuid)" --arg in_private "$(get inbound_private_key)" \
+    --arg in_short "$(get inbound_short_id)" --arg in_sni "$(get inbound_sni)" \
+    --arg in_handshake "$(get inbound_handshake)" \
+    --arg jp_host "$(get jp_host)" --argjson jp_port "$(get jp_port)" \
+    --arg jp_uuid "$(get jp_uuid)" --arg jp_public "$(get jp_public_key)" \
+    --arg jp_short "$(get jp_short_id)" --arg jp_sni "$(get jp_sni)" \
+    --arg ss_method "$(get jp_ss_method)" --arg ss_password "$(get jp_ss_password)" \
+    --argjson ss_port "$(get jp_ss_port)" --arg mode "$(get mode)" '
+    {
+      log:{level:"warn",timestamp:true},
+      inbounds:[{
+        type:"vless",tag:"sg-reality-in",listen:$listen,listen_port:$listen_port,
+        users:[{uuid:$in_uuid,flow:"xtls-rprx-vision"}],
+        tls:{enabled:true,server_name:$in_sni,reality:{
+          enabled:true,handshake:{server:$in_handshake,server_port:443},
+          private_key:$in_private,short_id:[$in_short]
+        }}
+      }],
+      outbounds:(
+        if $mode=="reality" then [{
+          type:"vless",tag:"to-jp-reality",server:$jp_host,server_port:$jp_port,
+          uuid:$jp_uuid,flow:"xtls-rprx-vision",network:"tcp",
+          tls:{enabled:true,server_name:$jp_sni,
+            utls:{enabled:true,fingerprint:"chrome"},
+            reality:{enabled:true,public_key:$jp_public,short_id:$jp_short}}
+        }] else [{
+          type:"shadowsocks",tag:"to-jp-ss",server:$jp_host,server_port:$ss_port,
+          method:$ss_method,password:$ss_password,network:"tcp"
+        }] end
+      ),
+      route:{final:(if $mode=="reality" then "to-jp-reality" else "to-jp-ss" end)}
+    }'
+}
+render_apply(){
+  local tmp
+  tmp="$(mktemp "$CONFIG_DIR/config.json.XXXXXX")"
+  if ! render_config > "$tmp"; then rm -f "$tmp"; return 1; fi
+  chmod 600 "$tmp"
+  if ! "$BIN" check -c "$tmp"; then
+    rm -f "$tmp"; err "Config check failed; active config was not replaced."; return 1
+  fi
+  mv -f "$tmp" "$CONFIG_FILE"
+}
+begin_change(){
+  local snapshot="$1"
+  CHANGE_SNAPSHOT="$(backup_state "$snapshot")"
+  CHANGE_OLD_DATA="$(mktemp)"
+  CHANGE_OLD_CONFIG="$(mktemp)"
+  cp -a "$DATA_FILE" "$CHANGE_OLD_DATA"
+  [[ ! -f "$CONFIG_FILE" ]] || cp -a "$CONFIG_FILE" "$CHANGE_OLD_CONFIG"
+}
+finish_change(){
+  if ! render_apply || ! rc-service sing-box restart; then
+    err "Apply failed; rolling back."
+    cp -a "$CHANGE_OLD_DATA" "$DATA_FILE"
+    [[ ! -s "$CHANGE_OLD_CONFIG" ]] || cp -a "$CHANGE_OLD_CONFIG" "$CONFIG_FILE"
+    rc-service sing-box restart || true
+    rm -f "$CHANGE_OLD_DATA" "$CHANGE_OLD_CONFIG"
+    return 1
+  fi
+  rm -f "$CHANGE_OLD_DATA" "$CHANGE_OLD_CONFIG"
+  ok "Change applied. Backup: $CHANGE_SNAPSHOT"
+  write_uri
+}
+change_string(){
+  local key="$1" label="$2" validator="$3" current value
+  current="$(get "$key")"
+  read -r -p "$label [$current]: " value
+  if [[ -z "$value" ]]; then value="$current"; fi
+  case "$validator" in
+    host) valid_host "$value" || { warn "Invalid host/address."; return 1; } ;;
+    uuid) valid_uuid "$value" || { warn "Invalid UUID."; return 1; } ;;
+    short) valid_short "$value" || { warn "Short ID must be even-length hex, up to 16 characters."; return 1; } ;;
+    pubkey) valid_pubkey "$value" || { warn "Invalid Reality public key."; return 1; } ;;
+    nonempty) [[ -n "$value" ]] || { warn "Value cannot be empty."; return 1; } ;;
+  esac
+  begin_change "before-$key"
+  set_string "$key" "$value"
+  finish_change
+}
+change_number(){
+  local key="$1" label="$2" current value
+  current="$(get "$key")"
+  read -r -p "$label [$current]: " value
+  if [[ -z "$value" ]]; then value="$current"; fi
+  valid_port "$value" || { warn "Port must be 1-65535."; return 1; }
+  begin_change "before-$key"
+  set_number "$key" "$value"
+  finish_change
+}
+format_host(){
+  if [[ "$1" == *:* && "$1" != \[*\] ]]; then printf '[%s]' "$1"; else printf '%s' "$1"; fi
+}
+write_uri(){
+  need_data
+  local host uri
+  host="$(format_host "$(get public_host)")"
+  uri="vless://$(get inbound_uuid)@$host:$(get public_port)?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(get inbound_sni)&fp=chrome&pbk=$(get inbound_public_key)&sid=$(get inbound_short_id)&type=tcp&headerType=none#SG-GoMami-via-JP"
+  printf '%s\n' "$uri" > "$URI_FILE"; chmod 600 "$URI_FILE"
+}
+show_info(){
+  need_data
+  printf '\nMode: %s\nSingapore public: %s:%s\nSingapore listen: %s:%s/TCP\nJapan endpoint: %s:%s\nSingapore SNI: %s\nJapan SNI: %s\n' \
+    "$(get mode)" "$(get public_host)" "$(get public_port)" "$(get listen_address)" "$(get listen_port)" \
+    "$(get jp_host)" "$(if [[ "$(get mode)" == "reality" ]]; then get jp_port; else get jp_ss_port; fi)" \
+    "$(get inbound_sni)" "$(get jp_sni)"
+  echo "Credentials are stored in root-only local files and are not displayed here."
+  echo "Data: $DATA_FILE"
+  echo "Runtime config: $CONFIG_FILE"
+}
+show_uri(){
+  need_data; write_uri
+  echo "Client VLESS Reality URI (sensitive; do not publish):"
+  cat "$URI_FILE"
+}
+service_status(){
+  rc-service sing-box status 2>&1 || true
+  if command -v ss >/dev/null 2>&1; then ss -lntp | grep -E ":$(get listen_port)([[:space:]]|$)" || true
+  else netstat -lntp 2>/dev/null | grep ":$(get listen_port)[[:space:]]" || true; fi
+}
+config_check(){ "$BIN" check -c "$CONFIG_FILE"; }
+show_ss_japan_snippet(){
+  need_data
+  local pass method
+  pass="$(get jp_ss_password)"; method="$(get jp_ss_method)"
+  [[ -n "$pass" ]] || die "SS credentials have not been generated. Select SS mode first."
+  cat <<EOF
+Append this inbound object to the Japan BIGLOBE /etc/sing-box/config.json inbounds array.
+Add provider mapping: public TCP $(get jp_ss_port) -> 10.88.204.79:8388.
+
+{
+  "type": "shadowsocks",
+  "tag": "jp-ss-in",
+  "listen": "10.88.204.79",
+  "listen_port": 8388,
+  "network": "tcp",
+  "method": "$method",
+  "password": "$pass"
+}
+EOF
+}
+switch_mode(){
+  local choice port method pass
+  echo "1) Reality -> Reality (baseline)"
+  echo "2) Reality -> Shadowsocks (Japan SS inbound and port mapping required)"
+  read -r -p "Select [1]: " choice
+  if [[ -z "$choice" ]]; then choice=1; fi
+  case "$choice" in
+    1)
+      begin_change before-mode-reality
+      set_string mode reality
+      finish_change
+      ;;
+    2)
+      port="$(ask_value 'Japan SS public port (mapped to internal 8388/TCP)' "$(get jp_ss_port)")"
+      valid_port "$port" || die "Invalid SS port."
+      method="$(ask_value 'SS method' "$(get jp_ss_method)")"
+      case "$method" in
+        2022-blake3-aes-128-gcm)
+          pass="$(get jp_ss_password)"
+          if [[ -z "$pass" ]]; then pass="$("$BIN" generate rand --base64 16)"; fi
+          ;;
+        aes-128-gcm|chacha20-ietf-poly1305)
+          pass="$(get jp_ss_password)"
+          if [[ -z "$pass" ]]; then pass="$(openssl rand -base64 24 | tr -d '\n')"; fi
+          ;;
+        *) die "Supported methods: 2022-blake3-aes-128-gcm, aes-128-gcm, chacha20-ietf-poly1305." ;;
+      esac
+      begin_change before-mode-ss
+      set_number jp_ss_port "$port"
+      set_string jp_ss_method "$method"
+      set_string jp_ss_password "$pass"
+      set_string mode ss
+      finish_change
+      show_ss_japan_snippet
+      warn "Add the Japan SS inbound and provider port mapping before using this mode."
+      ;;
+    *) info "Cancelled." ;;
+  esac
+}
+rotate_reality(){
+  local keys private public sid uuid
+  keys="$("$BIN" generate reality-keypair)"
+  private="$(printf '%s\n' "$keys" | awk -F': ' '/^PrivateKey:/ {print $2}')"
+  public="$(printf '%s\n' "$keys" | awk -F': ' '/^PublicKey:/ {print $2}')"
+  sid="$("$BIN" generate rand 8 --hex)"
+  uuid="$(cat /proc/sys/kernel/random/uuid)"
+  [[ -n "$private" && -n "$public" && -n "$sid" && -n "$uuid" ]] || die "Reality credential generation failed."
+  begin_change before-rotate-reality
+  set_string inbound_private_key "$private"
+  set_string inbound_public_key "$public"
+  set_string inbound_short_id "$sid"
+  set_string inbound_uuid "$uuid"
+  finish_change
+  warn "Singapore inbound credentials changed. Re-import the client URI."
+  show_uri
+}
+setup(){
+  need_root
+  [[ ! -s "$DATA_FILE" ]] || die "relay.json already exists. Back up or uninstall before reinitializing."
+  mkdir -p "$CONFIG_DIR" "$BACKUP_ROOT"; chmod 700 "$CONFIG_DIR" "$BACKUP_ROOT"
+  local public_host public_port listen_address listen_port inbound_sni jp_host jp_port jp_uuid jp_public jp_short jp_sni
+  local keys private public sid uuid
+  public_host="$(ask_value 'Singapore public IP/domain' '178.94.15.19')"
+  public_port="$(ask_value 'Singapore public mapped TCP port' '30010')"
+  listen_address="$(ask_value 'Singapore listen address' '0.0.0.0')"
+  listen_port="$(ask_value 'Singapore internal listen port' '10010')"
+  inbound_sni="$(ask_value 'Singapore Reality SNI/handshake domain' 'addons.mozilla.org')"
+  jp_host="$(ask_value 'Japan BIGLOBE public endpoint' '167.254.242.31')"
+  jp_port="$(ask_value 'Japan BIGLOBE Reality public port' '30001')"
+  jp_sni="$(ask_value 'Japan Reality SNI' 'addons.mozilla.org')"
+  valid_host "$public_host" && valid_port "$public_port" && valid_host "$listen_address" && valid_port "$listen_port" || die "Invalid Singapore endpoint/port."
+  valid_host "$inbound_sni" && valid_host "$jp_host" && valid_port "$jp_port" && valid_host "$jp_sni" || die "Invalid SNI/Japan endpoint."
+  jp_uuid="$(ask_secret 'Japan existing VLESS UUID')"
+  jp_public="$(ask_secret 'Japan Reality Public Key')"
+  jp_short="$(ask_secret 'Japan Reality Short ID')"
+  valid_uuid "$jp_uuid" || die "Invalid Japan UUID."
+  valid_pubkey "$jp_public" || die "Invalid Japan Reality Public Key."
+  valid_short "$jp_short" || die "Japan Short ID must be even-length hex, up to 16 characters."
+  keys="$("$BIN" generate reality-keypair)"
+  private="$(printf '%s\n' "$keys" | awk -F': ' '/^PrivateKey:/ {print $2}')"
+  public="$(printf '%s\n' "$keys" | awk -F': ' '/^PublicKey:/ {print $2}')"
+  sid="$("$BIN" generate rand 8 --hex)"
+  uuid="$(cat /proc/sys/kernel/random/uuid)"
+  [[ -n "$private" && -n "$public" && -n "$sid" && -n "$uuid" ]] || die "Could not generate Singapore Reality credentials."
+  jq -n \
+    --arg public_host "$public_host" --argjson public_port "$public_port" \
+    --arg listen_address "$listen_address" --argjson listen_port "$listen_port" \
+    --arg inbound_uuid "$uuid" --arg inbound_private_key "$private" \
+    --arg inbound_public_key "$public" --arg inbound_short_id "$sid" \
+    --arg inbound_sni "$inbound_sni" --arg inbound_handshake "$inbound_sni" \
+    --arg jp_host "$jp_host" --argjson jp_port "$jp_port" \
+    --arg jp_uuid "$jp_uuid" --arg jp_public_key "$jp_public" \
+    --arg jp_short_id "$jp_short" --arg jp_sni "$jp_sni" '
+    {
+      schema_version:1,mode:"reality",
+      public_host:$public_host,public_port:$public_port,
+      listen_address:$listen_address,listen_port:$listen_port,
+      inbound_uuid:$inbound_uuid,inbound_private_key:$inbound_private_key,
+      inbound_public_key:$inbound_public_key,inbound_short_id:$inbound_short_id,
+      inbound_sni:$inbound_sni,inbound_handshake:$inbound_handshake,
+      jp_host:$jp_host,jp_port:$jp_port,jp_uuid:$jp_uuid,
+      jp_public_key:$jp_public_key,jp_short_id:$jp_short_id,jp_sni:$jp_sni,
+      jp_ss_port:30003,jp_ss_method:"2022-blake3-aes-128-gcm",jp_ss_password:""
+    }' > "$DATA_FILE"
+  chmod 600 "$DATA_FILE"
+  render_config > "$CONFIG_FILE.tmp"; chmod 600 "$CONFIG_FILE.tmp"
+  if ! "$BIN" check -c "$CONFIG_FILE.tmp"; then rm -f "$CONFIG_FILE.tmp" "$DATA_FILE"; die "Config validation failed; service not started."; fi
+  mv -f "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+  cat > "$SERVICE_FILE" <<'OPENRC'
+#!/sbin/openrc-run
+name="sing-box"
+description="SG-JP sing-box relay"
+command="/usr/local/bin/sing-box"
+command_args="run -c /etc/sing-box/config.json"
+command_background="yes"
+pidfile="/run/sing-box.pid"
+supervisor=supervise-daemon
+supervise_daemon_args="--respawn-max 0 --respawn-delay 5"
+output_log="/var/log/sing-box.log"
+error_log="/var/log/sing-box.err"
+depend() { need net; }
+start_pre() {
+  checkpath --directory --mode 0755 /var/log
+  checkpath --directory --mode 0755 /run
+}
+OPENRC
+  chmod 755 "$SERVICE_FILE"
+  rc-update add sing-box default
+  rc-service sing-box start || { tail -n 60 /var/log/sing-box.err 2>/dev/null || true; die "Service start failed; backup and config retained."; }
+  write_uri
+  ok "Reality -> Reality baseline configured."
+  show_info
+  show_uri
+}
+backup_menu(){
+  local dest; dest="$(backup_state manual)"; ok "Backup: $dest"
+}
+restore_menu(){
+  local dir selected index source count
+  count=0
+  echo "Available backups:"
+  for dir in "$BACKUP_ROOT"/*; do
+    [[ -d "$dir" ]] || continue
+    count=$((count+1))
+    printf '%d) %s\n' "$count" "$dir"
+  done
+  ((count > 0)) || { warn "No directory backups found."; return 0; }
+  read -r -p "Number (0 cancel): " selected
+  [[ "$selected" =~ ^[0-9]+$ ]] || return 1
+  ((selected > 0 && selected <= count)) || return 0
+  index=0; source=""
+  for dir in "$BACKUP_ROOT"/*; do
+    [[ -d "$dir" ]] || continue
+    index=$((index+1))
+    if ((index == selected)); then source="$dir/sing-box"; break; fi
+  done
+  [[ -d "$source" && -s "$source/relay.json" && -s "$source/config.json" ]] || { warn "Selected backup has no complete relay config."; return 1; }
+  backup_state before-restore >/dev/null
+  rm -rf "$CONFIG_DIR"; cp -a "$source" "$CONFIG_DIR"
+  chmod 700 "$CONFIG_DIR"; chmod 600 "$DATA_FILE" "$CONFIG_FILE"
+  config_check && rc-service sing-box restart && ok "Restore complete."
+}
+update_core(){
+  local tmp api tag version asset digest url candidate old
+  tmp="$(mktemp -d)"
+  api="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
+  info "Checking latest stable sing-box release..."
+  curl -fsSL --connect-timeout 15 "$api" -o "$tmp/release.json"
+  tag="$(jq -r '.tag_name // empty' "$tmp/release.json")"
+  [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "Could not identify latest stable version."
+  version="$(printf '%s' "$tag" | sed 's/^v//')"
+  asset="sing-box-$version-linux-amd64-musl.tar.gz"
+  url="$(jq -r --arg n "$asset" '.assets[] | select(.name==$n) | .browser_download_url' "$tmp/release.json" | head -n1)"
+  digest="$(jq -r --arg n "$asset" '.assets[] | select(.name==$n) | .digest // empty' "$tmp/release.json" | head -n1)"
+  [[ -n "$url" && "$digest" == sha256:* ]] || die "Release asset or SHA256 digest unavailable."
+  curl -fL --retry 3 --connect-timeout 15 -o "$tmp/$asset" "$url"
+  digest="$(printf '%s' "$digest" | cut -d: -f2)"
+  printf '%s  %s\n' "$digest" "$tmp/$asset" | sha256sum -c -
+  tar -xzf "$tmp/$asset" -C "$tmp"
+  candidate="$(find "$tmp" -type f -name sing-box | head -n1)"
+  [[ -n "$candidate" ]] || die "sing-box binary not found in archive."
+  "$candidate" check -c "$CONFIG_FILE"
+  backup_state before-core-update >/dev/null
+  old="$tmp/sing-box.old"; cp -a "$BIN" "$old"
+  install -m 0755 "$candidate" "$BIN.new"; mv -f "$BIN.new" "$BIN"
+  if ! rc-service sing-box restart; then
+    cp -a "$old" "$BIN"; rc-service sing-box restart || true
+    rm -rf "$tmp"; die "Update failed; previous binary restored."
+  fi
+  rm -rf "$tmp"; ok "Updated: $("$BIN" version | head -n1)"
+}
+update_manager(){
+  local tmp; tmp="$(mktemp)"
+  curl -fsSL "$REPO_RAW/sb" -o "$tmp"
+  bash -n "$tmp"
+  install -m 0755 "$tmp" /usr/local/bin/sb
+  rm -f "$tmp"; ok "sb manager updated."
+}
+uninstall_menu(){
+  local choice snapshot
+  echo "1) Remove program/service, keep /etc/sing-box"
+  echo "2) Full removal of program/service/config (backup first)"
+  echo "0) Cancel"
+  read -r -p "Select: " choice
+  case "$choice" in
+    1|2)
+      snapshot="$(backup_state pre-uninstall)"
+      rc-service sing-box stop 2>/dev/null || true
+      rc-update del sing-box default 2>/dev/null || true
+      rm -f "$SERVICE_FILE" /usr/local/bin/sb "$BIN"
+      [[ ! -L /usr/bin/sb ]] || rm -f /usr/bin/sb
+      if [[ "$choice" == "2" ]]; then rm -rf "$CONFIG_DIR"; rm -f /var/log/sing-box.log /var/log/sing-box.err; fi
+      ok "Uninstalled. Backup retained at: $snapshot"
+      exit 0
+      ;;
+    *) info "Cancelled." ;;
+  esac
+}
+menu(){
+  need_root
+  while true; do
+    clear 2>/dev/null || true
+    echo "=============================================="
+    echo "       SG-JP sing-box Relay Manager"
+    echo "=============================================="
+    if [[ -s "$DATA_FILE" ]]; then
+      echo "Mode: $(get mode) | SG: $(get public_host):$(get public_port) | JP: $(get jp_host)"
+    else
+      echo "Not initialized"
+    fi
+    cat <<'MENU'
+ 1) Show node parameters
+ 2) Show client VLESS link
+ 3) Change Singapore public IP/domain
+ 4) Change Singapore public port
+ 5) Change Singapore internal listen port
+ 6) Change Singapore listen address
+ 7) Change Singapore UUID
+ 8) Rotate Singapore Reality key/Short ID/UUID
+ 9) Change Singapore Reality SNI
+10) Change Japan endpoint IP/domain
+11) Change Japan Reality public port
+12) Change Japan Reality UUID
+13) Change Japan Reality Public Key
+14) Change Japan Reality Short ID
+15) Change Japan Reality SNI
+16) Switch Reality / Shadowsocks outbound
+17) Show Japan SS inbound snippet
+18) Validate config
+19) Start / Stop / Restart service
+20) Show service status/listener
+21) Follow logs
+22) Backup current config
+23) Restore a backup
+24) Update sing-box core
+25) Update sb manager
+26) Uninstall sing-box
+ 0) Exit
+MENU
+    read -r -p "Select: " choice
+    case "$choice" in
+      1) show_info ;;
+      2) show_uri ;;
+      3) change_string public_host "Singapore public IP/domain" host ;;
+      4) change_number public_port "Singapore public port" ;;
+      5) change_number listen_port "Singapore internal listen port" ;;
+      6) change_string listen_address "Singapore listen address" host ;;
+      7) change_string inbound_uuid "Singapore UUID" uuid ;;
+      8) rotate_reality ;;
+      9)
+        local new_sni
+        new_sni="$(ask_value 'Singapore Reality SNI' "$(get inbound_sni)")"
+        valid_host "$new_sni" || { warn "Invalid SNI."; continue; }
+        begin_change before-inbound-sni
+        set_string inbound_sni "$new_sni"; set_string inbound_handshake "$new_sni"
+        finish_change
+        ;;
+      10) change_string jp_host "Japan endpoint IP/domain" host ;;
+      11) change_number jp_port "Japan Reality public port" ;;
+      12) change_string jp_uuid "Japan Reality UUID" uuid ;;
+      13) change_string jp_public_key "Japan Reality Public Key" pubkey ;;
+      14) change_string jp_short_id "Japan Reality Short ID" short ;;
+      15) change_string jp_sni "Japan Reality SNI" host ;;
+      16) switch_mode ;;
+      17) show_ss_japan_snippet ;;
+      18) config_check ;;
+      19)
+        echo "1) start  2) stop  3) restart"
+        read -r -p "Select: " action
+        case "$action" in 1) rc-service sing-box start ;; 2) rc-service sing-box stop ;; 3) rc-service sing-box restart ;; *) warn "Invalid selection." ;; esac
+        ;;
+      20) service_status ;;
+      21) tail -n 100 -f /var/log/sing-box.log /var/log/sing-box.err ;;
+      22) backup_menu ;;
+      23) restore_menu ;;
+      24) update_core ;;
+      25) update_manager ;;
+      26) uninstall_menu ;;
+      0) exit 0 ;;
+      *) warn "Invalid selection." ;;
+    esac
+    echo
+    read -r -p "Press Enter to return..." _
+  done
+}
+
+need_root
+cmd="menu"
+if [[ $# -gt 0 ]]; then cmd="$1"; fi
+case "$cmd" in
+  setup) setup ;;
+  menu) menu ;;
+  status) service_status ;;
+  node|uri) show_uri ;;
+  check) config_check ;;
+  update) update_core ;;
+  *) echo "Usage: sb [menu|setup|status|node|check|update]"; exit 2 ;;
+esac
