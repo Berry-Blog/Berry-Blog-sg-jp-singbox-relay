@@ -52,6 +52,17 @@ ask_plain(){
   read -r -p "$prompt（明文输入）: " value
   printf '%s' "$value"
 }
+find_httpd_binary(){
+  local candidate
+  for candidate in "$(command -v busybox-extras 2>/dev/null || true)" /bin/busybox-extras /usr/bin/busybox-extras; do
+    [[ -n "$candidate" && -x "$candidate" ]] || continue
+    if "$candidate" --list 2>/dev/null | grep -qx httpd; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
 
 backup_state(){
   local label="手动备份" stamp dest
@@ -218,8 +229,8 @@ write_vless_links(){
   direct_uri="vless://$(get direct_uuid)@$host:$(get public_port)?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(get inbound_sni)&fp=chrome&pbk=$(get inbound_public_key)&sid=$(get inbound_short_id)&type=tcp&headerType=none#SG-Direct"
   jp_uri="vless://$(get inbound_uuid)@$host:$(get public_port)?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(get inbound_sni)&fp=chrome&pbk=$(get inbound_public_key)&sid=$(get inbound_short_id)&type=tcp&headerType=none#SG-via-JP"
   {
-    printf '# 节点 A：新加坡直出\n%s\n\n' "$direct_uri"
-    printf '# 节点 B：新加坡中转日本 BIGLOBE\n%s\n' "$jp_uri"
+    printf '%s\n' "$direct_uri"
+    printf '%s\n' "$jp_uri"
   } > "$URI_FILE"
   chmod 600 "$URI_FILE"
 }
@@ -333,10 +344,12 @@ show_links(){
   need_data
   [[ -n "$(get direct_uuid)" ]] || die "请先选择菜单 9 应用双节点配置，再导出节点链接。"
   write_exports
-  printf '\n========== VLESS 一键导入链接 ==========\n'
-  sed -n '1,4p' "$URI_FILE"
-  printf '\n文件位置：%s\n' "$URI_FILE"
-  printf 'Clash Meta/Mihomo 配置文件：%s\n\n' "$CLASH_FILE"
+  printf '\n========== 节点 A：新加坡直出 ==========\n'
+  sed -n '1p' "$URI_FILE"
+  printf '\n========== 节点 B：新加坡中转日本 BIGLOBE ==========\n'
+  sed -n '2p' "$URI_FILE"
+  printf '\n两个 VLESS 链接均可单独复制导入；文件位置：%s\n' "$URI_FILE"
+  printf 'Clash Meta/Mihomo 本地配置文件：%s\n\n' "$CLASH_FILE"
 }
 show_clash(){
   need_data
@@ -591,11 +604,13 @@ subscription_enable(){
   need_data
   [[ -n "$(get direct_uuid)" ]] || die "请先选择菜单 9 应用双节点配置，再启用 Clash 订阅。"
   write_exports
-  if ! busybox --list 2>/dev/null | grep -qx httpd; then
-    info "正在安装 BusyBox HTTP 服务组件..."
+  local HTTPD_BIN
+  if ! HTTPD_BIN="$(find_httpd_binary)"; then
+    info "正在安装 Alpine BusyBox 扩展 HTTP 服务组件..."
     apk add --no-cache busybox-extras
+    HTTPD_BIN="$(find_httpd_binary)" || die "busybox-extras 已安装，但未找到 httpd applet；请检查 /bin/busybox-extras --list。"
   fi
-  busybox --list 2>/dev/null | grep -qx httpd || die "当前系统没有 BusyBox httpd，无法启用本地订阅服务。"
+  info "HTTP 服务程序：$HTTPD_BIN"
   local port base token old_token
   port="$(ask_port '本地订阅服务监听端口' '18080')"
   if netstat -lnt 2>/dev/null | awk -v p="$port" '$4 ~ (":" p "$") { found=1 } END { exit !found }'; then
@@ -621,7 +636,7 @@ subscription_enable(){
 #!/sbin/openrc-run
 name="sb-subscription"
 description="SG-JP Clash subscription file server"
-command="/bin/busybox"
+command="$HTTPD_BIN"
 command_args="httpd -f -p 127.0.0.1:$port -h $SUB_ROOT"
 command_background="yes"
 pidfile="/run/sb-subscription.pid"
@@ -785,8 +800,8 @@ menu(){
  1）查看双节点状态与参数
  2）明文显示 UUID、Reality 密钥和 Short ID
  3）显示两个 VLESS 一键导入链接
- 4）生成 Clash Meta / Mihomo YAML 配置文件
- 5）启用或配置 HTTPS Clash 订阅服务
+ 4）导出 Clash Meta / Mihomo 配置文件（本地 YAML，手动导入）
+ 5）启用 Clash 远程订阅服务（HTTPS，需配置反向代理）
  6）查看当前 Clash 订阅链接
  7）重新生成订阅访问令牌
  8）关闭 Clash 订阅服务
