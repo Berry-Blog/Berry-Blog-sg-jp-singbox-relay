@@ -18,6 +18,15 @@ jobs:
           bash -n sb
           bash -n tests/test-config.sh
 
+      - name: Check VLESS export and Alpine subscription wiring
+        run: |
+          grep -Fq 'sed -n '\''2p'\'' "$URI_FILE"' sb
+          grep -Fq 'find_httpd_binary' sb
+          grep -Fq 'command="$HTTPD_BIN"' sb
+          grep -Fq 'busybox-extras' sb
+          grep -Fq '本地 YAML，手动导入' sb
+          grep -Fq 'HTTPS，需配置反向代理' sb
+
       - name: Install jq
         run: |
           sudo apt-get update
