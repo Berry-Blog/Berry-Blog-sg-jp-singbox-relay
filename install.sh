@@ -19,6 +19,8 @@ die(){ printf '[ERROR] %s\n' "$*" >&2; exit 1; }
 [[ "${ID:-}" == "alpine" ]] || die "当前版本仅支持 Alpine Linux。"
 [[ "$(uname -m)" == "x86_64" ]] || die "当前版本仅支持 x86_64。"
 command -v rc-service >/dev/null 2>&1 || die "未检测到 OpenRC。"
+FREE_MB="$(df -Pm / | awk 'NR==2 {print $4}')"
+[[ "$FREE_MB" =~ ^[0-9]+$ ]] && (( FREE_MB >= 120 )) || die "根分区可用空间不足 120MB。"
 
 info "安装依赖..."
 apk add --no-cache bash curl ca-certificates jq openssl tar coreutils net-tools
@@ -32,8 +34,6 @@ curl -fsSL --retry 3 \
   -o "$TMP/sb" || die "无法从公开仓库下载 sb 管理脚本。"
 bash -n "$TMP/sb" || die "GitHub 中的 sb 管理脚本语法检查失败。"
 
-FREE_MB="$(df -Pm / | awk 'NR==2 {print $4}')"
-[[ "$FREE_MB" =~ ^[0-9]+$ ]] && (( FREE_MB >= 120 )) || die "根分区可用空间不足 120MB。"
 if [[ -s "$CONFIG_DIR/config.json" || -s "$CONFIG_DIR/relay.json" ]]; then
   die "发现现有 sing-box 配置。为避免删除有效配置，安装器停止；请先使用 sb 卸载或手动确认。"
 fi
