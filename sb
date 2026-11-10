@@ -285,6 +285,7 @@ setup(){
   jp_sni="$(ask_value 'Japan Reality SNI' 'addons.mozilla.org')"
   valid_host "$public_host" && valid_port "$public_port" && valid_host "$listen_address" && valid_port "$listen_port" || die "Invalid Singapore endpoint/port."
   valid_host "$inbound_sni" && valid_host "$jp_host" && valid_port "$jp_port" && valid_host "$jp_sni" || die "Invalid SNI/Japan endpoint."
+  if netstat -lnt 2>/dev/null | awk -v p="$listen_port" '$4 ~ (":" p "$") { found=1 } END { exit !found }'; then die "Selected internal listen port is already occupied."; fi
   jp_uuid="$(ask_secret 'Japan existing VLESS UUID')"
   jp_public="$(ask_secret 'Japan Reality Public Key')"
   jp_short="$(ask_secret 'Japan Reality Short ID')"
@@ -408,17 +409,20 @@ update_manager(){
   local tmp token
   tmp="$(mktemp)"
   token="\${GH_TOKEN:-}"
-  if [[ -z "$token" ]]; then
-    read -r -s -p "GitHub fine-grained token (Contents: Read-only): " token </dev/tty
-    printf '\n' >/dev/tty
-  fi
-  [[ -n "$token" ]] || die "A GitHub token is required for this private repository."
-  if ! curl -fsSL -H "Authorization: Bearer $token" -H "Accept: application/vnd.github.raw" \
-    "$REPO_API/sb?ref=main" -o "$tmp"; then
-    rm -f "$tmp"; die "Unable to download manager from GitHub."
+  if [[ -n "$token" ]]; then
+    curl -fsSL -H "Authorization: Bearer $token" -H "Accept: application/vnd.github.raw" \
+      "$REPO_API/sb?ref=main" -o "$tmp" || { rm -f "$tmp"; die "Unable to download manager from GitHub."; }
+  else
+    if ! curl -fsSL -H "Accept: application/vnd.github.raw" "$REPO_API/sb?ref=main" -o "$tmp"; then
+      read -r -s -p "GitHub fine-grained token (Contents: Read-only): " token </dev/tty
+      printf '\n' >/dev/tty
+      [[ -n "$token" ]] || { rm -f "$tmp"; die "A GitHub token is required for this private repository."; }
+      curl -fsSL -H "Authorization: Bearer $token" -H "Accept: application/vnd.github.raw" \
+        "$REPO_API/sb?ref=main" -o "$tmp" || { rm -f "$tmp"; die "Unable to download manager from private GitHub repository."; }
+    fi
   fi
   unset token
-  bash -n "$tmp"
+  bash -n "$tmp" || { rm -f "$tmp"; die "Downloaded manager failed Bash syntax validation."; }
   install -m 0755 "$tmp" /usr/local/bin/sb
   rm -f "$tmp"; ok "sb manager updated."
 }
