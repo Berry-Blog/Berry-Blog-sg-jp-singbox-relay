@@ -484,6 +484,10 @@ change_string(){
   begin_change "修改-$key-前"
   set_string "$key" "$value"
   finish_change
+  case "$key" in
+    inbound_uuid) warn "节点 B 客户端 UUID 已修改，请重新导入节点 B 的 VLESS 链接。" ;;
+    jp_uuid|jp_public_key|jp_short_id) warn "日本落地认证参数已修改，必须与日本 BIGLOBE 的 Reality 入站配置保持一致。" ;;
+  esac
 }
 change_number(){
   local key="$1" label="$2" current value
@@ -592,7 +596,7 @@ subscription_enable(){
     apk add --no-cache busybox-extras
   fi
   busybox --list 2>/dev/null | grep -qx httpd || die "当前系统没有 BusyBox httpd，无法启用本地订阅服务。"
-  local port base token
+  local port base token old_token
   port="$(ask_port '本地订阅服务监听端口' '18080')"
   if netstat -lnt 2>/dev/null | awk -v p="$port" '$4 ~ (":" p "$") { found=1 } END { exit !found }'; then
     die "本地订阅监听端口已被占用，请换一个端口。"
@@ -600,8 +604,10 @@ subscription_enable(){
   base="$(ask_value '外部 HTTPS 订阅域名基础地址（例如 https://sub.example.com）' '')"
   [[ "$base" == https://* ]] || die "为了保护节点凭据，公开订阅地址必须使用 HTTPS。"
   base="$(printf '%s' "$base" | sed 's:/*$::')"
+  old_token="$(get sub_token)"
   token="$(openssl rand -hex 32)"
   backup_state "启用订阅服务前" >/dev/null
+  [[ -z "$old_token" ]] || rm -rf "$SUB_ROOT/$old_token"
   set_number sub_listen_port "$port"
   set_string sub_base_url "$base"
   set_string sub_token "$token"
