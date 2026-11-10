@@ -50,18 +50,18 @@ apk add --no-cache bash curl && bash -c "$(curl -fsSL https://raw.githubusercont
 
 ## 导出文件
 
-应用双节点配置后，执行 \`sb\`：
+菜单 3 和菜单 4 是两个不同的导出方式，不是重复功能：
 
-- 菜单 3：显示两个 VLESS 分享链接，保存在 \`/etc/sing-box/export/vless.txt\`
-- 菜单 4：生成 Clash Meta/Mihomo 配置，保存在 \`/etc/sing-box/export/clash.yaml\`
-
-Clash YAML 内含两个代理节点和一个手动选择策略组，可通过 SCP 下载后在 Clash Meta / Mihomo 中从文件导入。
+- **菜单 3：VLESS 分享链接**。生成两个独立的 VLESS URI，文件 `/etc/sing-box/export/vless.txt` 只包含两条 URI，方便逐条复制或批量导入。
+- **菜单 4：本地 Clash 配置文件**。生成包含两个节点及手动选择策略组的 YAML，保存到 `/etc/sing-box/export/clash.yaml`。通过 SCP 下载后，在 Clash Meta / Mihomo 中从文件导入。
+- **菜单 5：远程订阅服务**。不是再次生成本地 YAML，而是启动本机静态文件服务，让 Clash 客户端可以通过 HTTPS 订阅地址自动更新 YAML。
 
 ## Clash 远程订阅地址
 
 菜单 5 可以启用一个轻量本机静态文件服务：
 
-- 默认仅监听 \`127.0.0.1:18080\`，不直接开放公网端口
+- Alpine 的 HTTP applet 由 `busybox-extras` 包提供，实际执行文件为 `/bin/busybox-extras`；不能用基础 `/bin/busybox --list` 判断扩展 applet 是否存在。
+- 默认仅监听 `127.0.0.1:18080`，不直接开放公网端口
 - 生成随机长令牌路径，订阅文件不放在公开仓库
 - 要获得可用的远程订阅 URL，需自行将 HTTPS 域名、Cloudflare Tunnel 或 HTTPS 反向代理转发到脚本显示的本机上游地址
 - 订阅 URL 包含随机访问令牌，等同于节点凭据；不要公开分享
