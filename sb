@@ -397,54 +397,180 @@ write_exports(){
 }
 show_info(){
   need_data
-  printf '\n========== 双节点信息 ==========\n'
-  printf '运行模式：%s\n' "$(get mode)"
+  printf '\n========== 多出口节点信息 ==========\n'
+  printf '原日本模式：%s\n' "$(get mode)"
   printf '新加坡公网入口：%s:%s\n' "$(get public_host)" "$(get public_port)"
   printf '新加坡监听：%s:%s/TCP\n' "$(get listen_address)" "$(get listen_port)"
   printf '节点 A：新加坡直出（UUID：%s）\n' "$(get direct_uuid)"
   printf '节点 B：新加坡中转日本（UUID：%s）\n' "$(get inbound_uuid)"
-  printf '日本落地：%s:%s\n' "$(get jp_host)" "$(get jp_port)"
+  printf '日本 BIGLOBE：%s:%s\n' "$(get jp_host)" "$(get jp_port)"
+  printf '其他落地机数量：%s\n' "$(jq -r '(.extra_exits // []) | length' "$DATA_FILE")"
+  jq -r '.extra_exits[]? | "  \(.name) [\(.id)] 协议：\(.protocol) 目标：\(.host):\(.port) 客户端UUID：\(.client_uuid)"' "$DATA_FILE"
   printf 'Reality SNI：%s\n' "$(get inbound_sni)"
-  printf '配置文件：%s\n' "$CONFIG_FILE"
-  printf 'VLESS 链接文件：%s\n' "$URI_FILE"
-  printf 'Clash 配置文件：%s\n\n' "$CLASH_FILE"
+  printf '配置文件：%s\nVLESS 文件：%s\nClash 文件：%s\n\n' "$CONFIG_FILE" "$URI_FILE" "$CLASH_FILE"
 }
 show_credentials(){
   need_data
-  printf '\n========== 认证参数明文（请勿公开分享） ==========\n'
+  printf '\n========== 完整认证参数（明文，请勿公开） ==========\n'
   printf '\n【新加坡 Reality 入站】\n'
-  printf '节点 A（新加坡直出）UUID：%s\n' "$(get direct_uuid)"
-  printf '节点 B（日本家宽出口）UUID：%s\n' "$(get inbound_uuid)"
+  printf 'SG Direct UUID：%s\n' "$(get direct_uuid)"
+  printf 'SG via JP UUID：%s\n' "$(get inbound_uuid)"
   printf 'Reality Private Key：%s\n' "$(get inbound_private_key)"
   printf 'Reality Public Key：%s\n' "$(get inbound_public_key)"
-  printf 'Reality Short ID：%s\n' "$(get inbound_short_id)"
-  printf 'Reality SNI：%s\n' "$(get inbound_sni)"
+  printf 'Reality Short ID：%s\nReality SNI：%s\n' "$(get inbound_short_id)" "$(get inbound_sni)"
   printf '\n【日本 BIGLOBE Reality 出站】\n'
-  printf '日本 VLESS UUID：%s\n' "$(get jp_uuid)"
+  printf '日本落地 VLESS UUID：%s\n' "$(get jp_uuid)"
   printf '日本 Reality Public Key：%s\n' "$(get jp_public_key)"
-  printf '日本 Reality Short ID：%s\n' "$(get jp_short_id)"
-  printf '日本 Reality SNI：%s\n' "$(get jp_sni)"
-  printf '\n提示：以上参数均在 SSH 终端明文显示；本地参数文件权限为 600。\n\n'
+  printf '日本 Reality Short ID：%s\nReality SNI：%s\n' "$(get jp_short_id)" "$(get jp_sni)"
+  printf '\n【新增落地机（明文）】\n'
+  jq -r '.extra_exits[]? | if .protocol=="reality" then
+    "\(.name) [\(.id)]: 客户端UUID=\(.client_uuid), 公网=\(.host):\(.port), 落地UUID=\(.uuid), Reality Public Key=\(.public_key), Short ID=\(.short_id), SNI=\(.sni)"
+    else "\(.name) [\(.id)]: 客户端UUID=\(.client_uuid), 公网=\(.host):\(.port), SS方式=\(.method), SS密码=\(.password)" end' "$DATA_FILE"
+  printf '\n注意：参数仅在 SSH 终端展示，relay.json 为 root-only（600）。\n\n'
 }
 show_links(){
   need_data
-  [[ -n "$(get direct_uuid)" ]] || die "请先选择菜单 9 应用双节点配置，再导出节点链接。"
+  [[ -n "$(get direct_uuid)" ]] || die "请先选择菜单 9 应用节点配置。"
   write_exports
-  printf '\n========== 节点 A：新加坡直出 ==========\n'
-  sed -n '1p' "$URI_FILE"
-  printf '\n========== 节点 B：新加坡中转日本 BIGLOBE ==========\n'
-  sed -n '2p' "$URI_FILE"
-  printf '\n两个 VLESS 链接均可单独复制导入；文件位置：%s\n' "$URI_FILE"
-  printf 'Clash Meta/Mihomo 本地配置文件：%s\n\n' "$CLASH_FILE"
+  local n=0 uri label index
+  printf '\n========== 全部 VLESS 一键导入链接 ==========\n'
+  while IFS= read -r uri; do
+    ((n+=1))
+    case "$n" in
+      1) label='新加坡直出（SG-Direct）' ;;
+      2) label='日本 BIGLOBE（SG-via-JP）' ;;
+      *)
+        index="$((n-3))"
+        label="$(jq -r --argjson i "$index" '.extra_exits[$i] | "\(.name) [\(.id)]"' "$DATA_FILE")"
+        ;;
+    esac
+    printf '\n【%s】\n%s\n' "$label" "$uri"
+  done < "$URI_FILE"
+  printf '\n共 %s 条独立节点，均通过新加坡同一 Reality 入口。\n' "$n"
+  printf '链接文件：%s\nClash 文件：%s\n\n' "$URI_FILE" "$CLASH_FILE"
 }
 show_clash(){
   need_data
-  [[ -n "$(get direct_uuid)" ]] || die "请先选择菜单 9 应用双节点配置，再导出 Clash 配置。"
+  [[ -n "$(get direct_uuid)" ]] || die "请先选择菜单 9 应用节点配置。"
   write_exports
-  printf 'Clash Meta / Mihomo 配置已生成：%s\n' "$CLASH_FILE"
-  printf '可通过 SCP 下载后，在 Clash Meta / Mihomo 中选择“从文件导入”。\n'
-  printf '配置文件包含两个 VLESS Reality 节点的认证信息，请勿公开分享。\n'
+  printf 'Clash Meta/Mihomo 配置文件：%s\n' "$CLASH_FILE"
+  printf '包含 %s 个 VLESS 节点；下载 YAML 后可在客户端导入。\n' "$(wc -l < "$URI_FILE" | tr -d '[:space:]')"
+  printf '注意：文件包含节点认证信息，请勿公开。\n'
 }
+list_extra_exits(){
+  need_data
+  printf '\n========== 新增落地机列表 ==========\n'
+  jq -r '.extra_exits[]? | "ID=\(.id) | 名称=\(.name) | 协议=\(.protocol) | 目标=\(.host):\(.port) | 客户端UUID=\(.client_uuid)"' "$DATA_FILE"
+  [[ "$(jq -r '(.extra_exits // []) | length' "$DATA_FILE")" -gt 0 ]] || warn "目前没有新增落地机，使用菜单 33 添加。"
+}
+extra_exists(){
+  jq -e --arg id "$1" 'any(.extra_exits[]?; .id==$id)' "$DATA_FILE" >/dev/null
+}
+select_extra_id(){
+  local id
+  list_extra_exits >&2
+  id="$(ask_value '请输入落地机 ID' '')"
+  valid_exit_id "$id" || { warn "ID 格式错误。"; return 1; }
+  extra_exists "$id" || { warn "未找到此 ID。"; return 1; }
+  printf '%s' "$id"
+}
+prompt_extra_json(){
+  local id="$1" old="$2" name protocol host port client_uuid response
+  local uuid public_key short_id sni method password
+  name="$(ask_value '落地机名称（例如 美国PAV）' "$(jq -r '.name // empty' <<< "$old")")"
+  valid_exit_name "$name" || { warn "落地机名称不能为空。"; return 1; }
+  protocol="$(jq -r '.protocol // empty' <<< "$old")"
+  if [[ -z "$protocol" ]]; then
+    protocol="$(ask_value '落地协议（reality 或 ss）' 'reality')"
+  else
+    warn "保留原协议 $protocol；切换协议请删除后重新添加。"
+  fi
+  [[ "$protocol" == "reality" || "$protocol" == "ss" ]] || { warn "只支持 reality 和 ss。"; return 1; }
+  host="$(ask_value '落地机公网 IP/域名' "$(jq -r '.host // empty' <<< "$old")")"
+  valid_host "$host" || { warn "落地机地址不合法。"; return 1; }
+  port="$(ask_port '落地机公网 TCP 端口（商家映射端口）' "$(jq -r '.port // 30001' <<< "$old")")"
+  client_uuid="$(jq -r '.client_uuid // empty' <<< "$old")"
+  if [[ -n "$client_uuid" ]]; then
+    read -r -p '是否重新生成该线路的客户端 UUID？[y/N]： ' response
+    if [[ "$response" == "y" || "$response" == "Y" ]]; then
+      client_uuid="$("$BIN" generate uuid)"
+      warn "UUID 已重新生成，旧客户端链接会失效。"
+    fi
+  else
+    client_uuid="$("$BIN" generate uuid)"
+  fi
+  valid_uuid "$client_uuid" || { warn "生成客户端 UUID 失败。"; return 1; }
+  if [[ "$protocol" == "reality" ]]; then
+    uuid="$(ask_value '落地端 VLESS UUID（必须与落地机一致）' "$(jq -r '.uuid // empty' <<< "$old")")"
+    public_key="$(ask_value '落地端 Reality Public Key' "$(jq -r '.public_key // empty' <<< "$old")")"
+    short_id="$(ask_value '落地端 Reality Short ID（可留空）' "$(jq -r '.short_id // empty' <<< "$old")")"
+    sni="$(ask_value '落地端 Reality SNI' "$(jq -r '.sni // "addons.mozilla.org"' <<< "$old")")"
+    valid_uuid "$uuid" && valid_pubkey "$public_key" && valid_short_or_empty "$short_id" && valid_host "$sni" || { warn "落地端 UUID / Public Key / Short ID / SNI 不合法。"; return 1; }
+    jq -n --arg id "$id" --arg name "$name" --arg protocol "$protocol" --arg host "$host" --argjson port "$port" \
+      --arg client_uuid "$client_uuid" --arg uuid "$uuid" --arg public_key "$public_key" --arg short_id "$short_id" --arg sni "$sni" '
+      {id:$id,name:$name,protocol:$protocol,host:$host,port:$port,client_uuid:$client_uuid,
+       uuid:$uuid,public_key:$public_key,short_id:$short_id,sni:$sni}'
+  else
+    method="$(ask_value '落地端 Shadowsocks 加密方式' "$(jq -r '.method // "2022-blake3-aes-128-gcm"' <<< "$old")")"
+    password="$(ask_value '落地端 Shadowsocks 密码（明文）' "$(jq -r '.password // empty' <<< "$old")")"
+    valid_ss_method "$method" && [[ -n "$password" ]] || { warn "Shadowsocks 加密方式或密码不合法。"; return 1; }
+    jq -n --arg id "$id" --arg name "$name" --arg protocol "$protocol" --arg host "$host" --argjson port "$port" \
+      --arg client_uuid "$client_uuid" --arg method "$method" --arg password "$password" '
+      {id:$id,name:$name,protocol:$protocol,host:$host,port:$port,client_uuid:$client_uuid,
+       method:$method,password:$password}'
+  fi
+}
+save_extra_change(){
+  local action="$1" id="$2" entry="$3" tmp
+  tmp="$(mktemp "$CONFIG_DIR/relay.json.XXXXXX")"
+  case "$action" in
+    add) jq --argjson e "$entry" '.schema_version=3 | .extra_exits=((.extra_exits // []) + [$e])' "$DATA_FILE" > "$tmp" ;;
+    edit) jq --arg id "$id" --argjson e "$entry" '.schema_version=3 | .extra_exits=(.extra_exits | map(if .id==$id then $e else . end))' "$DATA_FILE" > "$tmp" ;;
+    remove) jq --arg id "$id" '.schema_version=3 | .extra_exits=(.extra_exits | map(select(.id!=$id)))' "$DATA_FILE" > "$tmp" ;;
+    *) rm -f "$tmp"; return 1 ;;
+  esac
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$DATA_FILE"
+}
+add_extra_exit(){
+  need_data
+  local id entry
+  id="$(ask_value '落地机 ID（例如 us-pav，英文小写+数字+连字符）' 'us-pav')"
+  valid_exit_id "$id" || { warn "ID 必须以字母开头，2~32 位，仅含小写字母、数字和连字符。"; return 0; }
+  if extra_exists "$id"; then warn "ID 已存在，请选择菜单 35 修改。"; return 0; fi
+  info "仅修改新加坡中转机；请确认远端已部署对应服务且端口映射已生效。"
+  entry="$(prompt_extra_json "$id" '{}')" || { warn "新增取消，现有线路未改变。"; return 0; }
+  begin_change "添加-$id-落地机前"
+  save_extra_change add "$id" "$entry"
+  finish_change || return 1
+  ok "新增落地机 $id 已配置，原日本节点已保留。"
+  show_links
+}
+edit_extra_exit(){
+  need_data
+  local id old entry
+  id="$(select_extra_id)" || return 0
+  old="$(jq -c --arg id "$id" '.extra_exits[] | select(.id==$id)' "$DATA_FILE")"
+  entry="$(prompt_extra_json "$id" "$old")" || { warn "修改取消。"; return 0; }
+  begin_change "修改-$id-落地机前"
+  save_extra_change edit "$id" "$entry"
+  finish_change || return 1
+  ok "落地机 $id 已修改。"
+  show_links
+}
+remove_extra_exit(){
+  need_data
+  local id confirm
+  id="$(select_extra_id)" || return 0
+  read -r -p "确定删除 $id 中转路由及客户端链接？输入 YES： " confirm
+  [[ "$confirm" == "YES" ]] || { info "已取消。"; return 0; }
+  begin_change "删除-$id-落地机前"
+  save_extra_change remove "$id" '{}'
+  finish_change || return 1
+  ok "落地机 $id 已删除，其他线路保持不变。"
+  show_links
+}
+
 show_ss_japan_snippet(){
   need_data
   local pass method
