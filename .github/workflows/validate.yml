@@ -20,7 +20,11 @@ jobs:
 
       - name: Check VLESS export and Alpine subscription wiring
         run: |
-          grep -Fq 'sed -n '\''2p'\'' "$URI_FILE"' sb
+          grep -Fq 'while IFS= read -r uri; do' sb
+          grep -Fq 'extra_exits' sb
+          grep -Fq 'sg-via-' sb
+          grep -Fq '33）添加美国' sb
+          grep -Fq '36）删除已添加的落地机' sb
           grep -Fq 'find_httpd_binary' sb
           grep -Fq 'command="$HTTPD_BIN"' sb
           grep -Fq 'busybox-extras' sb
@@ -30,7 +34,7 @@ jobs:
       - name: Install jq
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq
+          sudo apt-get install -y jq python3-yaml
 
       - name: Download official sing-box 1.13.21
         run: |
@@ -45,6 +49,6 @@ jobs:
           sudo install -m 0755 "$BIN" /usr/local/bin/sing-box
           sing-box version
 
-      - name: Validate dual Reality route configuration
+      - name: Validate original JP and multi-exit Reality/SS routing, exports and YAML
         run: |
           bash tests/test-config.sh
