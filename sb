@@ -3,6 +3,7 @@ set -Eeuo pipefail
 export LANG=C.UTF-8
 
 REPO_RAW="https://raw.githubusercontent.com/Berry-Blog/Berry-Blog-sg-jp-singbox-relay/main"
+SB_VERSION="2026-11-12-multi-exit-1"
 CONFIG_DIR="/etc/sing-box"
 DATA_FILE="$CONFIG_DIR/relay.json"
 CONFIG_FILE="$CONFIG_DIR/config.json"
@@ -28,6 +29,12 @@ valid_uuid(){ [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-
 valid_short(){ [[ "$1" =~ ^([0-9a-fA-F]{2}){1,8}$ ]]; }
 valid_pubkey(){ [[ "$1" =~ ^[A-Za-z0-9_-]{43}$ ]]; }
 valid_host(){ [[ -n "$1" && "$1" != *[[:space:]]* && "$1" != *'/'* ]]; }
+valid_exit_id(){ [[ "$1" =~ ^[a-z][a-z0-9-]{1,31}$ ]]; }
+valid_exit_name(){ [[ -n "$1" && "$1" != *$'\r'* && "$1" != *$'\n'* ]]; }
+valid_short_or_empty(){ [[ -z "$1" ]] || valid_short "$1"; }
+valid_ss_method(){ case "$1" in 2022-blake3-aes-128-gcm|aes-128-gcm|chacha20-ietf-poly1305) return 0;; *) return 1;; esac; }
+yaml_quote(){ jq -nr --arg s "$1" '$s|@json'; }
+
 
 ask_value(){
   local prompt="$1" default="$2" value
@@ -142,7 +149,8 @@ render_config(){
     --arg ss_method "$(get jp_ss_method)" \
     --arg ss_password "$(get jp_ss_password)" \
     --argjson ss_port "$(get jp_ss_port)" \
-    --arg mode "$(get mode)" '
+    --arg mode "$(get mode)" \
+    --argjson extra_exits "$(jq -c '.extra_exits // []' "$DATA_FILE")" '
     {
       log:{level:"warn",timestamp:true},
       inbounds:[{
@@ -150,10 +158,16 @@ render_config(){
         tag:"sg-reality-in",
         listen:$listen,
         listen_port:$listen_port,
-        users:[
-          {name:"sg-direct",uuid:$direct_uuid,flow:"xtls-rprx-vision"},
-          {name:"sg-via-jp",uuid:$in_uuid,flow:"xtls-rprx-vision"}
-        ],
+        users:(
+          [
+            {name:"sg-direct",uuid:$direct_uuid,flow:"xtls-rprx-vision"},
+            {name:"sg-via-jp",uuid:$in_uuid,flow:"xtls-rprx-vision"}
+          ] + ($extra_exits | map({
+            name:("sg-via-" + .id),
+            uuid:.client_uuid,
+            flow:"xtls-rprx-vision"
+          }))
+        ),
         tls:{
           enabled:true,
           server_name:$in_sni,
@@ -189,17 +203,47 @@ render_config(){
           method:$ss_method,
           password:$ss_password,
           network:"tcp"
-        }] end)
+        }] end) +
+        ($extra_exits | map(
+          if .protocol=="reality" then {
+            type:"vless",
+            tag:("to-extra-" + .id),
+            server:.host,
+            server_port:.port,
+            uuid:.uuid,
+            flow:"xtls-rprx-vision",
+            network:"tcp",
+            tls:{
+              enabled:true,
+              server_name:.sni,
+              utls:{enabled:true,fingerprint:"chrome"},
+              reality:{enabled:true,public_key:.public_key,short_id:.short_id}
+            }
+          } else {
+            type:"shadowsocks",
+            tag:("to-extra-" + .id),
+            server:.host,
+            server_port:.port,
+            method:.method,
+            password:.password,
+            network:"tcp"
+          } end
+        ))
       ),
       route:{
-        rules:[
-          {
+        rules:(
+          [{
             inbound:["sg-reality-in"],
             auth_user:["sg-direct"],
             action:"route",
             outbound:"sg-direct-out"
-          }
-        ],
+          }] + ($extra_exits | map({
+            inbound:["sg-reality-in"],
+            auth_user:[("sg-via-" + .id)],
+            action:"route",
+            outbound:("to-extra-" + .id)
+          }))
+        ),
         final:(if $mode=="reality" then "to-jp-reality" else "to-jp-ss" end)
       }
     }'
@@ -221,27 +265,36 @@ format_host(){
 }
 write_vless_links(){
   need_data
-  [[ -n "$(get direct_uuid)" ]] || die "请先选择菜单 9 应用双节点配置，再生成两个节点链接。"
+  [[ -n "$(get direct_uuid)" ]] || die "请先选择菜单 9 应用节点配置，再生成链接。"
   mkdir -p "$EXPORT_DIR"
   chmod 700 "$EXPORT_DIR"
-  local host direct_uri jp_uri
+  local host direct_uri jp_uri extra id client_uuid uri
   host="$(format_host "$(get public_host)")"
   direct_uri="vless://$(get direct_uuid)@$host:$(get public_port)?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(get inbound_sni)&fp=chrome&pbk=$(get inbound_public_key)&sid=$(get inbound_short_id)&type=tcp&headerType=none#SG-Direct"
   jp_uri="vless://$(get inbound_uuid)@$host:$(get public_port)?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(get inbound_sni)&fp=chrome&pbk=$(get inbound_public_key)&sid=$(get inbound_short_id)&type=tcp&headerType=none#SG-via-JP"
   {
     printf '%s\n' "$direct_uri"
     printf '%s\n' "$jp_uri"
+    while IFS= read -r extra; do
+      [[ -n "$extra" ]] || continue
+      id="$(jq -r '.id' <<< "$extra")"
+      client_uuid="$(jq -r '.client_uuid' <<< "$extra")"
+      uri="vless://$client_uuid@$host:$(get public_port)?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(get inbound_sni)&fp=chrome&pbk=$(get inbound_public_key)&sid=$(get inbound_short_id)&type=tcp&headerType=none#SG-via-$id"
+      printf '%s\n' "$uri"
+    done < <(jq -c '.extra_exits[]?' "$DATA_FILE")
   } > "$URI_FILE"
   chmod 600 "$URI_FILE"
 }
 write_clash_yaml(){
   need_data
-  [[ -n "$(get direct_uuid)" ]] || die "请先选择菜单 9 应用双节点配置，再生成 Clash 配置。"
+  [[ -n "$(get direct_uuid)" ]] || die "请先选择菜单 9 应用节点配置，再生成 Clash 配置。"
   mkdir -p "$EXPORT_DIR"
   chmod 700 "$EXPORT_DIR"
-  cat > "$CLASH_FILE" <<EOF
-# SG-JP 双节点订阅配置
-# 适用于 Clash Meta / Mihomo 内核；仅配置 TCP Reality 节点
+  local extra id name label
+  {
+    cat <<EOF
+# sing-box 多出口节点；全部客户端仍连接新加坡 Reality 入口
+# 适用于 Clash Meta / Mihomo；仅配置 TCP Reality 节点
 mixed-port: 7890
 allow-lan: false
 mode: rule
@@ -278,6 +331,30 @@ proxies:
     reality-opts:
       public-key: "$(get inbound_public_key)"
       short-id: "$(get inbound_short_id)"
+EOF
+    while IFS= read -r extra; do
+      [[ -n "$extra" ]] || continue
+      id="$(jq -r '.id' <<< "$extra")"
+      name="$(jq -r '.name' <<< "$extra")"
+      label="$name [$id]"
+      printf '\n  - name: %s\n' "$(yaml_quote "$label")"
+      cat <<EOF
+    type: vless
+    server: "$(get public_host)"
+    port: $(get public_port)
+    uuid: "$(jq -r '.client_uuid' <<< "$extra")"
+    network: tcp
+    tls: true
+    udp: false
+    flow: xtls-rprx-vision
+    servername: "$(get inbound_sni)"
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: "$(get inbound_public_key)"
+      short-id: "$(get inbound_short_id)"
+EOF
+    done < <(jq -c '.extra_exits[]?' "$DATA_FILE")
+    cat <<'EOF'
 
 proxy-groups:
   - name: "节点选择"
@@ -285,11 +362,20 @@ proxy-groups:
     proxies:
       - "新加坡直出"
       - "新加坡-日本 BIGLOBE 家宽"
+EOF
+    while IFS= read -r extra; do
+      [[ -n "$extra" ]] || continue
+      id="$(jq -r '.id' <<< "$extra")"
+      name="$(jq -r '.name' <<< "$extra")"
+      printf '      - %s\n' "$(yaml_quote "$name [$id]")"
+    done < <(jq -c '.extra_exits[]?' "$DATA_FILE")
+    cat <<'EOF'
       - DIRECT
 
 rules:
   - MATCH,节点选择
 EOF
+  } > "$CLASH_FILE"
   chmod 600 "$CLASH_FILE"
 }
 sync_subscription_file(){
