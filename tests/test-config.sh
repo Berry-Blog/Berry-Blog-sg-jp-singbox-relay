@@ -80,3 +80,114 @@ jq -n \
 
 sing-box check -c "$TMP/config.json"
 echo "双 VLESS 用户、auth_user 路由及 Reality 出站配置校验通过。"
+
+
+echo "开始验证多落地机动态渲染、独立路由与客户端导出（仅使用随机测试密钥）。"
+
+export SB_LIB_ONLY=1
+source ./sb
+CONFIG_DIR="$TMP/sg"
+DATA_FILE="$CONFIG_DIR/relay.json"
+CONFIG_FILE="$CONFIG_DIR/config.json"
+EXPORT_DIR="$CONFIG_DIR/export"
+URI_FILE="$EXPORT_DIR/vless.txt"
+CLASH_FILE="$EXPORT_DIR/clash.yaml"
+BACKUP_ROOT="$TMP/backups"
+SUB_ROOT="$TMP/subscription"
+BIN="$(command -v sing-box)"
+mkdir -p "$CONFIG_DIR" "$EXPORT_DIR"
+
+US_CLIENT="$("$BIN" generate uuid)"
+US_LANDING="$("$BIN" generate uuid)"
+SS_CLIENT="$("$BIN" generate uuid)"
+
+jq -n \
+  --arg in_uuid "$JP_USER_UUID" --arg direct_uuid "$DIRECT_UUID" \
+  --arg in_private "$IN_PRIVATE" --arg in_public "$IN_PUBLIC" --arg in_short "$IN_SHORT" \
+  --arg jp_out_uuid "$JP_OUT_UUID" --arg jp_public "$JP_PUBLIC" --arg jp_short "$JP_SHORT" \
+  --arg us_client "$US_CLIENT" --arg us_landing "$US_LANDING" \
+  --arg ss_client "$SS_CLIENT" '
+  {
+    schema_version:3, mode:"reality",
+    public_host:"127.0.0.1",public_port:30010,
+    listen_address:"127.0.0.1",listen_port:10010,
+    inbound_uuid:$in_uuid,direct_uuid:$direct_uuid,
+    inbound_private_key:$in_private,inbound_public_key:$in_public,
+    inbound_short_id:$in_short,inbound_sni:"addons.mozilla.org",
+    inbound_handshake:"addons.mozilla.org",
+    jp_host:"example.com",jp_port:30001,jp_uuid:$jp_out_uuid,
+    jp_public_key:$jp_public,jp_short_id:$jp_short,jp_sni:"addons.mozilla.org",
+    jp_ss_port:30003,jp_ss_method:"2022-blake3-aes-128-gcm",jp_ss_password:"",
+    extra_exits:[
+      {
+        id:"us-pav",name:"美国 PAV",protocol:"reality",host:"example.com",port:443,
+        client_uuid:$us_client,uuid:$us_landing,public_key:$jp_public,
+        short_id:$jp_short,sni:"addons.mozilla.org"
+      },
+      {
+        id:"us-ss",name:"美国 SS 备用",protocol:"ss",host:"example.com",port:8388,
+        client_uuid:$ss_client,method:"aes-128-gcm",password:"test-password-not-production"
+      }
+    ]
+  }' > "$DATA_FILE"
+chmod 600 "$DATA_FILE"
+
+render_config > "$CONFIG_FILE"
+"$BIN" check -c "$CONFIG_FILE"
+jq -e '
+  (.inbounds[0].users | length)==4 and
+  (.outbounds | length)==4 and
+  .route.final=="to-jp-reality" and
+  ([.route.rules[] | select(.auth_user==["sg-direct"] and .outbound=="sg-direct-out")] | length)==1 and
+  ([.route.rules[] | select(.auth_user==["sg-via-us-pav"] and .outbound=="to-extra-us-pav")] | length)==1 and
+  ([.route.rules[] | select(.auth_user==["sg-via-us-ss"] and .outbound=="to-extra-us-ss")] | length)==1 and
+  ([.outbounds[] | select(.tag=="to-extra-us-pav" and .type=="vless")] | length)==1 and
+  ([.outbounds[] | select(.tag=="to-extra-us-ss" and .type=="shadowsocks")] | length)==1
+' "$CONFIG_FILE" >/dev/null
+
+write_exports
+test "$(wc -l < "$URI_FILE" | tr -d '[:space:]')" = "4"
+test "$(grep -c '^vless://' "$URI_FILE")" = "4"
+grep -Fq '#SG-Direct' "$URI_FILE"
+grep -Fq '#SG-via-JP' "$URI_FILE"
+grep -Fq '#SG-via-us-pav' "$URI_FILE"
+grep -Fq '#SG-via-us-ss' "$URI_FILE"
+
+# 测试生成 YAML 能被 Python YAML 解析器解析，且四个代理均在策略组中。
+/usr/bin/python3 - "$CLASH_FILE" <<'PY'
+import sys
+import yaml
+with open(sys.argv[1], encoding="utf-8") as fp:
+    conf = yaml.safe_load(fp)
+assert len(conf["proxies"]) == 4, conf["proxies"]
+names = [p["name"] for p in conf["proxies"]]
+assert len(set(names)) == 4, names
+group = conf["proxy-groups"][0]["proxies"]
+for name in names:
+    assert name in group, (name, group)
+assert all(p["type"] == "vless" for p in conf["proxies"])
+PY
+
+# 测试增删改存储与重新渲染，确认与原日本线路相互隔离。
+snapshot_jp="$(jq -c '[.inbound_uuid,.jp_uuid,.jp_public_key,.jp_short_id,.jp_host,.jp_port]' "$DATA_FILE")"
+save_extra_change remove "us-pav" '{}'
+test "$(jq -r '(.extra_exits // []) | length' "$DATA_FILE")" = "1"
+render_config > "$CONFIG_FILE"
+"$BIN" check -c "$CONFIG_FILE"
+write_exports
+test "$(wc -l < "$URI_FILE" | tr -d '[:space:]')" = "3"
+! grep -Fq '#SG-via-us-pav' "$URI_FILE"
+
+entry="$(jq -c '.extra_exits[0] | .name="修改后的备用出口"' "$DATA_FILE")"
+save_extra_change edit "us-ss" "$entry"
+jq -e '.extra_exits[0].name=="修改后的备用出口"' "$DATA_FILE" >/dev/null
+
+entry="$(jq -cn --arg u "$US_CLIENT" --arg v "$US_LANDING" --arg p "$JP_PUBLIC" --arg sid "$JP_SHORT" \
+  '{id:"us-pav",name:"美国 PAV",protocol:"reality",host:"example.com",port:443,client_uuid:$u,uuid:$v,public_key:$p,short_id:$sid,sni:"addons.mozilla.org"}')"
+save_extra_change add "us-pav" "$entry"
+render_config > "$CONFIG_FILE"
+"$BIN" check -c "$CONFIG_FILE"
+write_exports
+test "$(wc -l < "$URI_FILE" | tr -d '[:space:]')" = "4"
+test "$(jq -c '[.inbound_uuid,.jp_uuid,.jp_public_key,.jp_short_id,.jp_host,.jp_port]' "$DATA_FILE")" = "$snapshot_jp"
+echo "多落地机动态配置、节点路由、VLESS 链接、Clash YAML 及增删改回归测试通过。"
