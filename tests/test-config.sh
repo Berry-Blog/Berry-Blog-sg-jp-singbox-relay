@@ -191,3 +191,28 @@ write_exports
 test "$(wc -l < "$URI_FILE" | tr -d '[:space:]')" = "4"
 test "$(jq -c '[.inbound_uuid,.jp_uuid,.jp_public_key,.jp_short_id,.jp_host,.jp_port]' "$DATA_FILE")" = "$snapshot_jp"
 echo "多落地机动态配置、节点路由、VLESS 链接、Clash YAML 及增删改回归测试通过。"
+
+
+# 模拟实际菜单 33/35/36 的交互操作；不运行任何真实 system service。
+rc-service(){ return 0; }
+printf '%s\n' \
+  'us-pav2' '美国PAV第二条' 'reality' 'example.com' '443' \
+  "$US_LANDING" "$JP_PUBLIC" "$JP_SHORT" 'addons.mozilla.org' |
+  add_extra_exit > "$TMP/menu-add.out"
+test "$(jq -r '(.extra_exits // []) | length' "$DATA_FILE")" = "3"
+test "$(wc -l < "$URI_FILE" | tr -d '[:space:]')" = "5"
+jq -e '.extra_exits[] | select(.id=="us-pav2" and .name=="美国PAV第二条")' "$DATA_FILE" >/dev/null
+
+printf '%s\n' \
+  'us-pav2' '美国PAV已修改' 'example.com' '443' 'N' \
+  "$US_LANDING" "$JP_PUBLIC" "$JP_SHORT" 'addons.mozilla.org' |
+  edit_extra_exit > "$TMP/menu-edit.out"
+jq -e '.extra_exits[] | select(.id=="us-pav2" and .name=="美国PAV已修改")' "$DATA_FILE" >/dev/null
+
+printf '%s\n' 'us-pav2' 'YES' |
+  remove_extra_exit > "$TMP/menu-remove.out"
+test "$(jq -r '(.extra_exits // []) | length' "$DATA_FILE")" = "2"
+test "$(wc -l < "$URI_FILE" | tr -d '[:space:]')" = "4"
+! grep -Fq '#SG-via-us-pav2' "$URI_FILE"
+test "$(jq -c '[.inbound_uuid,.jp_uuid,.jp_public_key,.jp_short_id,.jp_host,.jp_port]' "$DATA_FILE")" = "$snapshot_jp"
+echo "菜单 33/35/36 实际交互增删改测试通过。"
