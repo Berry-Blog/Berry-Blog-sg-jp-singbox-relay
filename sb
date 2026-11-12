@@ -651,9 +651,10 @@ apply_dual_nodes(){
   if ! rc-service sing-box restart; then rollback_change; return 1; fi
   rm -f "$CHANGE_OLD_DATA" "$CHANGE_OLD_CONFIG"
   write_exports
-  ok "双节点配置已应用。"
+  ok "当前全部节点配置已应用。"
   printf '节点 A（新加坡直出）UUID：%s\n' "$(get direct_uuid)"
   printf '节点 B（日本 BIGLOBE 出口）UUID：%s\n' "$(get inbound_uuid)"
+  printf '新增落地机：%s 台\n' "$(jq -r '(.extra_exits // []) | length' "$DATA_FILE")"
   printf '原有日本中转节点 UUID、Reality Private Key、Public Key、Short ID 均已保留。\n'
   printf '修改前备份：%s\n' "$CHANGE_SNAPSHOT"
   show_links
@@ -684,7 +685,7 @@ rotate_reality(){
   public="$(printf '%s\n' "$keys" | awk -F': ' '/^PublicKey:/ {print $2}')"
   sid="$("$BIN" generate rand 8 --hex)"
   [[ -n "$private" && -n "$public" && -n "$sid" ]] || die "生成 Reality 密钥失败。"
-  warn "轮换 Reality 密钥会同时影响两个新加坡节点，旧客户端链接将失效。"
+  warn "轮换 Reality 密钥会影响全部经新加坡入口连接的节点，旧客户端链接将失效。"
   read -r -p "确认轮换？输入 YES： " confirm
   [[ "$confirm" == "YES" ]] || { info "已取消。"; return 0; }
   begin_change "轮换Reality密钥前"
@@ -949,7 +950,7 @@ setup(){
     --argjson jp_port "$jp_port" --arg jp_uuid "$jp_uuid" \
     --arg jp_public_key "$jp_public" --arg jp_short_id "$jp_short" --arg jp_sni "$jp_sni" '
     {
-      schema_version:2,mode:"reality",
+      schema_version:3,mode:"reality",extra_exits:[],
       public_host:$public_host,public_port:$public_port,
       listen_address:$listen_address,listen_port:$listen_port,
       inbound_uuid:$inbound_uuid,direct_uuid:$direct_uuid,
@@ -1000,24 +1001,24 @@ menu(){
   while true; do
     clear 2>/dev/null || true
     echo "===================================================="
-    echo "           SG-JP sing-box 双节点管理面板"
+    echo "       sing-box 新加坡多落地机中转管理面板"
     echo "===================================================="
     if [[ -s "$DATA_FILE" ]]; then
       printf '模式：%s | 新加坡入口：%s:%s\n' "$(get mode)" "$(get public_host)" "$(get public_port)"
-      printf '节点 A：新加坡直出 | 节点 B：日本 BIGLOBE 家宽\n'
+      printf '新加坡直出 + 日本 BIGLOBE + %s 台其他落地机 | 版本：%s\n' "$(jq -r '(.extra_exits // []) | length' "$DATA_FILE")" "$SB_VERSION"
     else
       echo "尚未初始化"
     fi
     cat <<'MENU'
- 1）查看双节点状态与参数
+ 1）查看全部节点状态与参数
  2）明文显示 UUID、Reality 密钥和 Short ID
- 3）显示两个 VLESS 一键导入链接
+ 3）显示全部 VLESS 一键导入链接
  4）导出 Clash Meta / Mihomo 配置文件（本地 YAML，手动导入）
  5）启用 Clash 远程订阅服务（HTTPS，需配置反向代理）
  6）查看当前 Clash 订阅链接
  7）重新生成订阅访问令牌
  8）关闭 Clash 订阅服务
- 9）应用/修复双节点路由配置（保留现有日本节点）
+ 9）应用/修复全部节点路由配置（保留现有日本节点）
 10）重新生成节点 A（新加坡直出）UUID
 11）修改节点 B（日本出口）客户端 UUID
 12）修改新加坡公网 IP/域名
@@ -1041,6 +1042,10 @@ menu(){
 30）更新 sb 管理脚本（从 GitHub 拉取最新版）
 31）更新 sing-box 核心
 32）卸载 sing-box
+33）添加美国 / 其他落地机（Reality / Shadowsocks）
+34）查看其他落地机列表
+35）修改已添加的落地机（可重置客户端 UUID）
+36）删除已添加的落地机
  0）退出
 MENU
     echo
@@ -1092,6 +1097,10 @@ MENU
       29) restore_menu ;;
       30) update_manager ;;
       31) update_core ;;
+      33) add_extra_exit ;;
+      34) list_extra_exits ;;
+      35) edit_extra_exit ;;
+      36) remove_extra_exit ;;
       32)
         echo "1）卸载程序和服务，保留配置"
         echo "2）完全卸载程序、服务和配置（历史备份保留）"
@@ -1124,6 +1133,9 @@ MENU
   done
 }
 
+if [[ "$(printenv SB_LIB_ONLY 2>/dev/null || true)" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
 need_root
 cmd="menu"
 [[ $# -eq 0 ]] || cmd="$1"
@@ -1135,5 +1147,6 @@ case "$cmd" in
   clash) show_clash ;;
   check) config_check ;;
   update) update_manager ;;
-  *) echo "用法：sb [menu|setup|status|links|clash|check|update]"; exit 2 ;;
+  version) printf '%s\n' "$SB_VERSION" ;;
+  *) echo "用法：sb [menu|setup|status|links|clash|check|update|version]"; exit 2 ;;
 esac
