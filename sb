@@ -392,7 +392,7 @@ EOF
       id="$(jq -r '.id' <<< "$item")"
       name="$(jq -r '.name' <<< "$item")"
       label="$name"
-      if [[ "$id" != "direct" && "$id" != "jp" ]]; then label="$name [$id]"; fi
+      if [[ "$id" != "direct" && "$id" != "jp" ]]; then label="SG-via-$id-$name"; fi
       printf '      - %s\n' "$(yaml_quote "$label")"
     done < <(line_array | jq -c '.[]')
     cat <<'EOF'
