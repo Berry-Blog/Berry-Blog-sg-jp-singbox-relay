@@ -1208,7 +1208,6 @@ MENU
   done
 }
 
-if [[ "$(printenv SB_LIB_ONLY
 if [[ "$(printenv SB_LIB_ONLY 2>/dev/null || true)" == "1" ]]; then
   return 0 2>/dev/null || exit 0
 fi
