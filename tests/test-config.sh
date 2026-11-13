@@ -204,7 +204,7 @@ test "$(wc -l < "$URI_FILE" | tr -d '[:space:]')" = "5"
 jq -e '.extra_exits[] | select(.id=="us-pav2" and .name=="美国PAV第二条")' "$DATA_FILE" >/dev/null
 
 printf '%s\n' \
-  'us-pav2' '美国PAV已修改' 'example.com' '443' 'N' \
+  'us-pav2' '美国PAV已修改' 'reality' 'example.com' '443' 'N' \
   "$US_LANDING" "$JP_PUBLIC" "$JP_SHORT" 'addons.mozilla.org' |
   edit_extra_exit > "$TMP/menu-edit.out"
 jq -e '.extra_exits[] | select(.id=="us-pav2" and .name=="美国PAV已修改")' "$DATA_FILE" >/dev/null
