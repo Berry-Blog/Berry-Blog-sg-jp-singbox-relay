@@ -305,7 +305,6 @@ render_config(){
     }'
 }
 render_apply(){
-render_apply(){
   local tmp
   tmp="$(mktemp "$CONFIG_DIR/config.json.XXXXXX")"
   if ! render_config > "$tmp"; then rm -f "$tmp"; return 1; fi
@@ -477,7 +476,7 @@ list_extra_exits(){
   list_lines
 }
 
-extra_exists(){extra_exists(){
+extra_exists(){
   jq -e --arg id "$1" 'any(.extra_exits[]?; .id==$id)' "$DATA_FILE" >/dev/null
 }
 select_extra_id(){
@@ -769,7 +768,7 @@ line_manager_menu(){
   done
 }
 
-apply_dual_nodes(){apply_dual_nodes(){
+apply_dual_nodes(){
   need_data
   [[ -x "$BIN" ]] || die "未找到 sing-box 核心程序。"
   if [[ -n "$(get direct_uuid)" ]]; then
