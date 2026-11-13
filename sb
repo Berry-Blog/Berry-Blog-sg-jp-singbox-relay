@@ -272,7 +272,7 @@ render_config(){
         users:($lines | map({
           name:(if .id=="direct" then "sg-direct" else "sg-via-" + .id end),
           uuid:.client_uuid,
-          flow:($line.flow // "xtls-rprx-vision")
+          flow:(.flow // "xtls-rprx-vision")
         })),
         tls:{
           enabled:true,
