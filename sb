@@ -333,7 +333,7 @@ write_vless_links(){
     name="$(jq -r '.name' <<< "$item")"
     uuid="$(jq -r '.client_uuid' <<< "$item")"
     label="$name"
-    if [[ "$id" != "direct" && "$id" != "jp" ]]; then label="$name [$id]"; fi
+    if [[ "$id" != "direct" && "$id" != "jp" ]]; then label="SG-via-$id-$name"; fi
     label="$(jq -nr --arg s "$label" '$s|@uri')"
     printf 'vless://%s@%s:%s?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp&headerType=none#%s\n' \
       "$uuid" "$host" "$(get public_port)" "$(get inbound_sni)" "$(get inbound_public_key)" "$(get inbound_short_id)" "$label" >> "$URI_FILE"
@@ -530,7 +530,7 @@ prompt_extra_json(){
   fi
 }
 
-save_extra_change(){save_extra_change(){
+save_extra_change(){
   local action="$1" id="$2" entry="$3" tmp
   tmp="$(mktemp "$CONFIG_DIR/relay.json.XXXXXX")"
   case "$action" in
