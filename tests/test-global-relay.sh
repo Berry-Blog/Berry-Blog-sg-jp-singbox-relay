@@ -82,7 +82,7 @@ test "$(wc -l < "$URI_FILE" | tr -d '[:space:]')" = 7
 grep -Fq '178.94.15.19:30010' "$URI_FILE"
 grep -Fq '%E6%97%A5%E6%9C%AC%20BIGLOBE' "$URI_FILE"
 ! grep -Fq '11111111-1111-4111-8111-111111111111@' "$URI_FILE"
-grep -Fq 'sg-via-global-biglobe' "$CLASH_FILE"
+grep -Fq 'SG-via-global-biglobe' "$CLASH_FILE"
 
 old_client="$(jq -r '.global_exits[]|select(.id=="global-biglobe")|.client_uuid' "$DATA_FILE")"
 printf '%s' '12121212-1212-4121-8121-121212121212' | global_relay edit-exit "$DATA_FILE" global-biglobe global-biglobe-jp '日本 BIGLOBE（重命名）'
