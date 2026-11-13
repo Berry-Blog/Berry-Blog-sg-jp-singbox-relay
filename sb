@@ -3,7 +3,7 @@ set -Eeuo pipefail
 export LANG=C.UTF-8
 
 REPO_RAW="https://raw.githubusercontent.com/Berry-Blog/Berry-Blog-sg-jp-singbox-relay/main"
-SB_VERSION="2026-11-13-unified-lines-1"
+SB_VERSION="2026-11-14-global-home-1"
 CONFIG_DIR="/etc/sing-box"
 DATA_FILE="$CONFIG_DIR/relay.json"
 CONFIG_FILE="$CONFIG_DIR/config.json"
@@ -15,6 +15,9 @@ SERVICE_FILE="/etc/init.d/sing-box"
 BIN="/usr/local/bin/sing-box"
 SUB_ROOT="/var/lib/sb-subscription"
 SUB_SERVICE="/etc/init.d/sb-subscription"
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+GLOBAL_RELAY_HELPER="$SCRIPT_DIR/global_relay.py"
+[[ -f "$GLOBAL_RELAY_HELPER" ]] || GLOBAL_RELAY_HELPER="/usr/local/libexec/sb/global_relay.py"
 
 info(){ printf '\033[1;36m[信息]\033[0m %s\n' "$*"; }
 ok(){ printf '\033[1;32m[成功]\033[0m %s\n' "$*"; }
@@ -34,6 +37,7 @@ valid_exit_name(){ [[ -n "$1" && "$1" != *$'\r'* && "$1" != *$'\n'* ]]; }
 valid_short_or_empty(){ [[ -z "$1" ]] || valid_short "$1"; }
 valid_ss_method(){ case "$1" in 2022-blake3-aes-128-gcm|aes-128-gcm|chacha20-ietf-poly1305) return 0;; *) return 1;; esac; }
 yaml_quote(){ jq -nr --arg s "$1" '$s|@json'; }
+global_relay(){ [[ -f "$GLOBAL_RELAY_HELPER" ]] || die "缺少Global线路管理模块，请运行 sb update。"; python3 "$GLOBAL_RELAY_HELPER" "$@"; }
 
 
 set_bool(){
@@ -48,13 +52,15 @@ migrate_legacy_data(){
   local tmp
   tmp="$(mktemp "$CONFIG_DIR/relay.json.migrate.XXXXXX")"
   jq '
-    .schema_version=4
+    .schema_version=5
     | .entrance_name=(.entrance_name // "狗妈")
     | .direct_name=(.direct_name // "狗妈直出")
     | .jp_name=(.jp_name // "日本 BIGLOBE")
     | .direct_enabled=(if has("direct_enabled") then .direct_enabled else true end)
     | .jp_enabled=(if has("jp_enabled") then .jp_enabled else true end)
     | .extra_exits=((.extra_exits // []) | map(.name=(.name // .id)))
+    | .global_profiles=(.global_profiles // [])
+    | .global_exits=(.global_exits // [])
     | .default_exit=(.default_exit // (if (.jp_enabled // true) then "jp" elif (.direct_enabled // true) then "direct" else ((.extra_exits[0].id) // "direct") end))
   ' "$DATA_FILE" > "$tmp"
   chmod 600 "$tmp"
@@ -79,7 +85,17 @@ line_array(){
       client_uuid:.client_uuid,uuid:(.uuid // ""),public_key:(.public_key // ""),
       short_id:(.short_id // ""),sni:(.sni // ""),
       method:(.method // ""),password:(.password // "")
-    }))
+    })) + ((.global_exits // []) | map(. as $exit
+      | (.global_profiles[]? | select(.profile_id==$exit.profile_id)) as $profile
+      | select($profile != null and ($exit.enabled // true)==true)
+      | {
+          id:$exit.id,name:($exit.name // $exit.id),protocol:"reality",
+          host:$profile.server,port:$profile.public_port,
+          client_uuid:$exit.client_uuid,uuid:$exit.global_uuid,
+          public_key:$profile.public_key,short_id:$profile.short_id,sni:$profile.sni,
+          flow:($profile.flow // "xtls-rprx-vision"),profile_id:$profile.profile_id,
+          global:true,expected_exit_ip:($exit.expected_exit_ip // "")
+        }))
   ' "$DATA_FILE"
 }
 line_exists(){
@@ -100,7 +116,11 @@ get_line_json(){
       jq -c '{id:"jp",name:(.jp_name // "日本 BIGLOBE"),protocol:(.mode // "reality"),host:.jp_host,port:(if .mode=="ss" then (.jp_ss_port // .jp_port) else .jp_port end),client_uuid:.inbound_uuid,uuid:.jp_uuid,public_key:.jp_public_key,short_id:.jp_short_id,sni:.jp_sni,method:.jp_ss_method,password:.jp_ss_password}' "$DATA_FILE"
       ;;
     *)
-      jq -c --arg id "$id" '.extra_exits[] | select(.id==$id)' "$DATA_FILE"
+      if jq -e --arg id "$id" 'any(.global_exits[]?; .id==$id)' "$DATA_FILE" >/dev/null; then
+        line_array | jq -c --arg id "$id" '.[] | select(.id==$id)'
+      else
+        jq -c --arg id "$id" '.extra_exits[] | select(.id==$id)' "$DATA_FILE"
+      fi
       ;;
   esac
 }
@@ -252,7 +272,7 @@ render_config(){
         users:($lines | map({
           name:(if .id=="direct" then "sg-direct" else "sg-via-" + .id end),
           uuid:.client_uuid,
-          flow:"xtls-rprx-vision"
+          flow:($line.flow // "xtls-rprx-vision")
         })),
         tls:{
           enabled:true,
@@ -275,7 +295,7 @@ render_config(){
           server:.host,
           server_port:.port,
           uuid:.uuid,
-          flow:"xtls-rprx-vision",
+          flow:(.flow // "xtls-rprx-vision"),
           network:"tcp",
           tls:{
             enabled:true,
@@ -476,7 +496,7 @@ list_extra_exits(){
 }
 
 extra_exists(){
-  jq -e --arg id "$1" 'any(.extra_exits[]?; .id==$id)' "$DATA_FILE" >/dev/null
+  jq -e --arg id "$1" 'any(.extra_exits[]?; .id==$id) or any(.global_exits[]?; .id==$id)' "$DATA_FILE" >/dev/null
 }
 select_extra_id(){
   local id
@@ -533,9 +553,9 @@ save_extra_change(){
   local action="$1" id="$2" entry="$3" tmp
   tmp="$(mktemp "$CONFIG_DIR/relay.json.XXXXXX")"
   case "$action" in
-    add) jq --argjson e "$entry" '.schema_version=4 | .extra_exits=((.extra_exits // []) + [$e])' "$DATA_FILE" > "$tmp" ;;
-    edit) jq --arg id "$id" --argjson e "$entry" '.schema_version=4 | .extra_exits=(.extra_exits | map(if .id==$id then $e else . end))' "$DATA_FILE" > "$tmp" ;;
-    remove) jq --arg id "$id" '.schema_version=4 | .extra_exits=(.extra_exits | map(select(.id!=$id)))' "$DATA_FILE" > "$tmp" ;;
+    add) jq --argjson e "$entry" '.schema_version=5 | .extra_exits=((.extra_exits // []) + [$e])' "$DATA_FILE" > "$tmp" ;;
+    edit) jq --arg id "$id" --argjson e "$entry" '.schema_version=5 | .extra_exits=(.extra_exits | map(if .id==$id then $e else . end))' "$DATA_FILE" > "$tmp" ;;
+    remove) jq --arg id "$id" '.schema_version=5 | .extra_exits=(.extra_exits | map(select(.id!=$id)))' "$DATA_FILE" > "$tmp" ;;
     *) rm -f "$tmp"; return 1 ;;
   esac
   chmod 600 "$tmp"
@@ -681,11 +701,15 @@ edit_line(){
       finish_change
       ;;
     *)
-      old="$(get_line_json "$id")"
-      entry="$(prompt_extra_json "$id" "$old")" || { warn "修改已取消。"; return 0; }
-      begin_change "修改-$id-线路前"
-      save_extra_change edit "$id" "$entry"
-      finish_change
+      if jq -e --arg id "$id" 'any(.global_exits[]?; .id==$id)' "$DATA_FILE" >/dev/null; then
+        global_edit_exit "$id"
+      else
+        old="$(get_line_json "$id")"
+        entry="$(prompt_extra_json "$id" "$old")" || { warn "修改已取消。"; return 0; }
+        begin_change "修改-$id-线路前"
+        save_extra_change edit "$id" "$entry"
+        finish_change
+      fi
       ;;
   esac
   show_links
@@ -700,7 +724,13 @@ delete_line(){
   case "$id" in
     direct) set_bool direct_enabled false ;;
     jp) set_bool jp_enabled false ;;
-    *) save_extra_change remove "$id" '{}' ;;
+    *)
+      if jq -e --arg id "$id" 'any(.global_exits[]?; .id==$id)' "$DATA_FILE" >/dev/null; then
+        global_relay remove-exit "$DATA_FILE" "$id" || { rollback_change; return 1; }
+      else
+        save_extra_change remove "$id" '{}'
+      fi
+      ;;
   esac
   remaining="$(line_array)"
   if [[ "$(get default_exit)" == "$id" ]]; then
@@ -743,6 +773,268 @@ entrance_settings(){
   finish_change
   warn "如果修改了公网映射端口或内部监听端口，请同步更新服务商端口映射。"
   warn "修改狗妈 Reality SNI 后，客户端及所有外部中转的 SNI 也必须同步修改。"
+}
+global_profile_list(){
+  jq -r '.global_profiles[]? | "\(.profile_id) | \(.name) | \(.server):\(.public_port) | SNI=\(.sni)"' "$DATA_FILE"
+}
+global_exit_list(){
+  line_array | jq -r '.[] | select(.global==true) | "\(.id) | \(.name) | Global=\(.host):\(.port) | Global UUID=\(.uuid) | 狗妈客户端 UUID=\(.client_uuid)"'
+}
+global_select_profile(){
+  local id
+  global_profile_list >&2
+  id="$(ask_value '请输入Global profile ID' '')"
+  jq -e --arg id "$id" 'any(.global_profiles[]?; .profile_id==$id)' "$DATA_FILE" >/dev/null || { warn "未找到Global profile。"; return 1; }
+  printf '%s' "$id"
+}
+global_import_json(){
+  local path mode plan added updated duplicate anomalies conflict confirm allow temp
+  path="$(ask_value 'Global JSON 文件路径' '/root/global-relay.json')"
+  [[ -f "$path" ]] || { warn "文件不存在：$path"; return 1; }
+  local file_mode
+  file_mode="$(stat -c '%a' "$path" 2>/dev/null || true)"
+  [[ "$file_mode" == 600 ]] || warn "该文件权限不是600。导入前建议在狗妈执行：chmod 600 '$path'"
+  echo "1）新增模式：只增加不存在的线路"
+  echo "2）更新模式：更新同一稳定ID的线路（保留狗妈客户端UUID）"
+  echo "3）增量导入：只增加新线路，不覆盖现有数据（默认）"
+  read -r -p '请选择导入模式 [1/2/3，默认3]：' choice
+  case "$choice" in 1) mode=add;; 2) mode=update;; *) mode=incremental;; esac
+  plan="$(mktemp "$CONFIG_DIR/global-relay-plan.XXXXXX")"
+  if ! global_relay plan "$path" "$DATA_FILE" "$mode" > "$plan"; then rm -f "$plan"; return 1; fi
+  added="$(jq '.add|length' "$plan")"; updated="$(jq '.update|length' "$plan")"
+  duplicate="$(jq '.duplicates|length' "$plan")"; anomalies="$(jq '.anomalies|length' "$plan")"
+  conflict="$(jq -r '.profile_conflict' "$plan")"
+  echo; echo '========== Global JSON 导入预览 =========='
+  jq -r '._profile | "Global名称：\(.name)\nGlobal服务器：\(.server):\(.public_port)"' "$plan"
+  printf '已有线路：%s\n准备新增：%s\n准备更新：%s\n重复线路：%s\n异常线路：%s\n' "$((duplicate+updated))" "$added" "$updated" "$duplicate" "$anomalies"
+  if (( added > 0 )); then jq -r '._additions[] | "新增：\(.name) [\(.id)] | \(.uuid)"' "$plan"; fi
+  if (( updated > 0 )); then jq -r '._updates[] | "更新：\(.name) [\(.id)]"' "$plan"; fi
+  if (( anomalies > 0 )); then jq -r '.anomalies[] | "异常：\(.name) [\(.id)]：\(.reason)"' "$plan"; fi
+  allow=''
+  if [[ "$conflict" == true ]]; then
+    warn '该 profile 的公共参数与本地不一致。确认后会统一更新其关联线路的 Global 服务器和 Reality 参数。'
+    read -r -p '是否明确更新公共参数？[y/N]：' confirm
+    [[ "$confirm" == y || "$confirm" == Y ]] || { rm -f "$plan"; info '已取消导入。'; return 0; }
+    allow='--allow-profile-update'
+  fi
+  read -r -p '确认执行安全增量导入？[y/N]：' confirm
+  [[ "$confirm" == y || "$confirm" == Y ]] || { rm -f "$plan"; info '已取消导入。'; return 0; }
+  if (( added == 0 && updated == 0 )) && [[ "$conflict" != true ]]; then
+    rm -f "$plan"; info '没有可新增或更新的正常线路。'; return 0
+  fi
+  begin_change '导入Global线路前'
+  if ! global_relay apply "$path" "$DATA_FILE" "$mode" $allow; then rm -f "$plan"; rollback_change; return 1; fi
+  rm -f "$plan"
+  finish_change || return 1
+  ok "导入处理完成：新增 $added 条、更新 $updated 条；异常 $anomalies 条未作为正常线路导入。"
+  show_links
+}
+global_manual_add(){
+  local method profile_file parsed uri profile_id profile_name server port network security sni fingerprint flow public_key short_id global_uuid line_id line_name tmp
+  profile_file="$(mktemp "$CONFIG_DIR/global-profile.XXXXXX")"
+  parsed="$(mktemp "$CONFIG_DIR/global-link.XXXXXX")"
+  echo '1）新建 Global 公共参数配置'
+  echo '2）使用已有 Global 公共参数配置'
+  read -r -p '请选择：' method
+  case "$method" in
+    1)
+      echo '1）粘贴完整 Global VLESS Reality 链接'
+      echo '2）逐字段输入 Global 公共参数'
+      read -r -p '请选择：' method
+      if [[ "$method" == 1 ]]; then
+        read -r -p '请粘贴Global完整VLESS Reality链接：' uri
+        if ! printf '%s' "$uri" | global_relay parse-link > "$parsed"; then rm -f "$profile_file" "$parsed"; return 1; fi
+        global_uuid="$(jq -r '.global_uuid' "$parsed")"
+        profile_id="$(ask_value 'Global profile ID' 'global-home-main')"
+        profile_name="$(ask_value 'Global profile 名称' 'Global Home')"
+        jq --arg pid "$profile_id" --arg name "$profile_name" '.profile | .profile_id=$pid | .name=$name' "$parsed" > "$profile_file"
+      elif [[ "$method" == 2 ]]; then
+        profile_id="$(ask_value 'Global profile ID' 'global-home-main')"
+        profile_name="$(ask_value 'Global profile 名称' 'Global Home')"
+        server="$(ask_value 'Global公网IP/域名' '209.33.166.81')"
+        port="$(ask_port 'Global公网映射端口（不要填写容器内部80）' '40045')"
+        network="$(ask_value 'Network（当前支持tcp）' 'tcp')"
+        security="$(ask_value 'Security（当前支持reality）' 'reality')"
+        sni="$(ask_value 'Global Reality SNI' 'www.apple.com')"
+        fingerprint="$(ask_value 'Reality Fingerprint（当前支持chrome）' 'chrome')"
+        flow="$(ask_value 'Reality Flow（当前支持xtls-rprx-vision）' 'xtls-rprx-vision')"
+        public_key="$(ask_value 'Global Reality Public Key' '')"
+        short_id="$(ask_value 'Global Reality Short ID' '')"
+        jq -n --arg id "$profile_id" --arg name "$profile_name" --arg server "$server" --argjson port "$port" --arg network "$network" --arg security "$security" --arg sni "$sni" --arg fp "$fingerprint" --arg flow "$flow" --arg key "$public_key" --arg sid "$short_id" \
+          '{profile_id:$id,name:$name,server:$server,public_port:$port,network:$network,security:$security,sni:$sni,fingerprint:$fp,flow:$flow,public_key:$key,short_id:$sid}' > "$profile_file"
+        global_uuid="$(ask_value '第一条Global家宽 UUID' '')"
+      else
+        rm -f "$profile_file" "$parsed"; warn '无效选项。'; return 1
+      fi
+      ;;
+    2)
+      profile_id="$(global_select_profile)" || { rm -f "$profile_file" "$parsed"; return 1; }
+      jq --arg id "$profile_id" '.global_profiles[] | select(.profile_id==$id)' "$DATA_FILE" > "$profile_file"
+      global_uuid="$(ask_value 'Global家宽 UUID（仅输入此线路的Global UUID）' '')"
+      ;;
+    *) rm -f "$profile_file" "$parsed"; warn '无效选项。'; return 1 ;;
+  esac
+  [[ -n "$global_uuid" ]] || { global_uuid="$(ask_value 'Global家宽 UUID' '')"; }
+  line_id="$(ask_value '线路 ID（可留空自动生成）' '')"
+  if [[ -z "$line_id" ]]; then
+    line_id="global-${global_uuid%%-*}"
+    local suffix=2 base="$line_id"
+    while extra_exists "$line_id"; do line_id="${base}-${suffix}"; suffix=$((suffix+1)); done
+  fi
+  line_name="$(ask_value '线路名称（可留空自动生成）' '')"
+  [[ -n "$line_name" ]] || line_name="Global线路 $line_id"
+  begin_change "添加Global-$line_id-前"
+  if ! printf '%s' "$global_uuid" | global_relay add-manual "$DATA_FILE" "$profile_file" "$line_id" "$line_name"; then
+    rm -f "$profile_file" "$parsed"; rollback_change; return 1
+  fi
+  rm -f "$profile_file" "$parsed"
+  if [[ -z "$(get default_exit)" ]]; then set_string default_exit "$line_id"; fi
+  finish_change || return 1
+  ok "Global线路已添加，狗妈客户端UUID独立生成并保留。"
+  show_links
+}
+global_edit_exit(){
+  local old_id new_id name global_uuid
+  old_id="$1"
+  local old
+  old="$(jq -c --arg id "$old_id" '.global_exits[] | select(.id==$id)' "$DATA_FILE")"
+  [[ -n "$old" ]] || { warn '未找到Global线路。'; return 1; }
+  new_id="$(ask_value '线路 ID' "$old_id")"
+  name="$(ask_value '线路名称' "$(jq -r '.name' <<< "$old")")"
+  global_uuid="$(ask_value 'Global UUID（狗妈客户端UUID保持不变）' "$(jq -r '.global_uuid' <<< "$old")")"
+  begin_change "修改Global-$old_id-前"
+  if ! printf '%s' "$global_uuid" | global_relay edit-exit "$DATA_FILE" "$old_id" "$new_id" "$name"; then rollback_change; return 1; fi
+  finish_change || return 1
+  ok 'Global线路信息已更新；原狗妈客户端UUID保持不变。'
+}
+global_remove_exit(){
+  local id name confirm
+  global_exit_list
+  id="$(ask_value '请输入要删除的Global线路ID' '')"
+  name="$(jq -r --arg id "$id" '.global_exits[]? | select(.id==$id) | .name' "$DATA_FILE")"
+  [[ -n "$name" ]] || { warn '未找到Global线路。'; return 1; }
+  read -r -p "确认删除 $name [$id] 及其狗妈用户、出站和路由？[y/N]：" confirm
+  [[ "$confirm" == y || "$confirm" == Y ]] || { info '已取消。'; return 0; }
+  begin_change "删除Global-$id-前"
+  if ! global_relay remove-exit "$DATA_FILE" "$id"; then rollback_change; return 1; fi
+  finish_change || return 1
+  ok 'Global线路及对应狗妈配置已删除，其余线路保持不变。'
+}
+global_edit_profile(){
+  local id profile_file name server public_port sni fingerprint flow public_key short_id network security confirm
+  id="$(global_select_profile)" || return 1
+  profile_file="$(mktemp "$CONFIG_DIR/global-profile.XXXXXX")"
+  jq --arg id "$id" '.global_profiles[] | select(.profile_id==$id)' "$DATA_FILE" > "$profile_file"
+  name="$(ask_value 'Profile名称' "$(jq -r '.name' "$profile_file")")"
+  server="$(ask_value 'Global公网IP/域名' "$(jq -r '.server' "$profile_file")")"
+  public_port="$(ask_port 'Global公网映射端口（不要填写容器内部端口）' "$(jq -r '.public_port' "$profile_file")")"
+  network="$(ask_value 'Network' "$(jq -r '.network' "$profile_file")")"
+  security="$(ask_value 'Security' "$(jq -r '.security' "$profile_file")")"
+  sni="$(ask_value 'Reality SNI' "$(jq -r '.sni' "$profile_file")")"
+  fingerprint="$(ask_value 'Fingerprint' "$(jq -r '.fingerprint' "$profile_file")")"
+  flow="$(ask_value 'Flow' "$(jq -r '.flow' "$profile_file")")"
+  public_key="$(ask_value 'Reality Public Key' "$(jq -r '.public_key' "$profile_file")")"
+  short_id="$(ask_value 'Reality Short ID' "$(jq -r '.short_id' "$profile_file")")"
+  jq --arg name "$name" --arg server "$server" --argjson port "$public_port" --arg network "$network" --arg security "$security" --arg sni "$sni" --arg fp "$fingerprint" --arg flow "$flow" --arg key "$public_key" --arg sid "$short_id" \
+    '.name=$name | .server=$server | .public_port=$port | .network=$network | .security=$security | .sni=$sni | .fingerprint=$fp | .flow=$flow | .public_key=$key | .short_id=$sid' "$profile_file" > "$profile_file.new"
+  mv -f "$profile_file.new" "$profile_file"
+  read -r -p '确认统一修改此profile下所有关联Global线路的公共参数？[y/N]：' confirm
+  [[ "$confirm" == y || "$confirm" == Y ]] || { rm -f "$profile_file"; info '已取消。'; return 0; }
+  begin_change "修改Global-profile-$id-前"
+  if ! global_relay update-profile "$DATA_FILE" "$profile_file"; then rm -f "$profile_file"; rollback_change; return 1; fi
+  rm -f "$profile_file"
+  finish_change || return 1
+  ok 'Profile已更新，关联线路已统一使用新公共参数。'
+}
+global_list_lines(){
+  echo '========== 全部 Global 家宽线路 =========='
+  global_exit_list
+}
+global_show_links(){
+  write_exports
+  local item uuid
+  echo '========== Global线路狗妈客户端 VLESS 链接 =========='
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    uuid="$(jq -r '.client_uuid' <<< "$item")"
+    grep -F "$uuid@" "$URI_FILE" || true
+  done < <(line_array | jq -c '.[] | select(.global==true)')
+}
+global_route_valid(){
+  local item id user outbound
+  item="$(get_line_json "$1")" || return 1
+  id="$(jq -r '.id' <<< "$item")"; user="sg-via-$id"; outbound="to-extra-$id"
+  jq -e --arg id "$id" --arg user "$user" --arg outbound "$outbound" --argjson item "$item" '
+    any(.inbounds[]? | .users[]?; .name==$user and .uuid==$item.client_uuid) and
+    any(.outbounds[]?; .tag==$outbound and .type=="vless" and .server==$item.host and .server_port==$item.port and .uuid==$item.uuid) and
+    any(.route.rules[]?; .auth_user==[$user] and .outbound==$outbound)
+  ' "$CONFIG_FILE" >/dev/null
+}
+global_probe_line(){
+  local item id host remote_port uuid public_key short_id sni flow expected test_port tmp pid ip reality tcp route ip_status
+  item="$(get_line_json "$1")" || return 1
+  id="$(jq -r '.id' <<< "$item")"; host="$(jq -r '.host' <<< "$item")"; remote_port="$(jq -r '.port' <<< "$item")"
+  uuid="$(jq -r '.uuid' <<< "$item")"; public_key="$(jq -r '.public_key' <<< "$item")"; short_id="$(jq -r '.short_id' <<< "$item")"
+  sni="$(jq -r '.sni' <<< "$item")"; flow="$(jq -r '.flow // "xtls-rprx-vision"' <<< "$item")"; expected="$(jq -r '.expected_exit_ip // empty' <<< "$item")"
+  if global_route_valid "$id"; then route=PASS; else route=FAIL; fi
+  if python3 -c 'import socket,sys; s=socket.create_connection((sys.argv[1],int(sys.argv[2])),timeout=5); s.close()' "$host" "$remote_port" >/dev/null 2>&1; then tcp=PASS; else tcp=FAIL; fi
+  reality=未确认; ip=未确认; ip_status=未确认
+  if [[ "$tcp" == PASS ]]; then
+    tmp="$(mktemp -d "$CONFIG_DIR/global-probe.XXXXXX")"; pid=''
+    test_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+    jq -n --arg host "$host" --argjson remote_port "$remote_port" --arg uuid "$uuid" --arg key "$public_key" --arg sid "$short_id" --arg sni "$sni" --arg flow "$flow" --argjson local_port "$test_port" \
+      '{log:{level:"error"},inbounds:[{type:"socks",tag:"global-check-in",listen:"127.0.0.1",listen_port:$local_port}],outbounds:[{type:"vless",tag:"global-check-out",server:$host,server_port:$remote_port,uuid:$uuid,flow:$flow,network:"tcp",tls:{enabled:true,server_name:$sni,utls:{enabled:true,fingerprint:"chrome"},reality:{enabled:true,public_key:$key,short_id:$sid}}}],route:{final:"global-check-out"}}' > "$tmp/config.json"
+    if "$BIN" check -c "$tmp/config.json" >/dev/null 2>&1; then
+      "$BIN" run -c "$tmp/config.json" >"$tmp/sing-box.log" 2>&1 & pid=$!
+      for _ in 1 2 3 4 5; do
+        if python3 -c 'import socket,sys; s=socket.create_connection(("127.0.0.1",int(sys.argv[1])),timeout=.5); s.close()' "$test_port" >/dev/null 2>&1; then break; fi
+        sleep 1
+      done
+      if curl -q --noproxy '*' -fsS --connect-timeout 5 --max-time 15 --socks5-hostname "127.0.0.1:$test_port" https://api.ipify.org -o "$tmp/ip.txt" 2>/dev/null; then
+        ip="$(tr -d '\r\n ' < "$tmp/ip.txt")"; reality=PASS
+        if [[ -n "$expected" ]]; then [[ "$ip" == "$expected" ]] && ip_status=MATCH || ip_status=MISMATCH; fi
+      else reality='未确认（完整 Reality 出站请求未成功；原因未判定）'; fi
+    else reality='未确认（本地测试配置无效）'; fi
+    if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
+    rm -rf "$tmp"
+  else reality='未测试（TCP未连通）'; fi
+  printf '%s | TCP=%s | Reality=%s | 狗妈用户→出站路由=%s | 最终出口IP=%s | 预期IP=%s\n' \
+    "$(jq -r '.name' <<< "$item")" "$tcp" "$reality" "$route" "$ip_status:$ip" "${expected:-未记录}"
+}
+global_status(){
+  line_array | jq -c '.[] | select(.global==true)' | while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    global_probe_line "$(jq -r '.id' <<< "$item")"
+  done
+  echo 'Reality握手与最终出口只在完整出站请求成功后报告通过；TCP连通不代表线路完整通过。'
+}
+global_menu(){
+  need_data
+  while true; do
+    echo; echo '========== Global 多家宽管理 =========='
+    echo '1）从 JSON 文件导入 Global 家宽'
+    echo '2）手动添加 Global 家宽'
+    echo '3）修改 Global 家宽线路'
+    echo '4）删除 Global 家宽线路'
+    echo '5）显示全部 Global 家宽线路'
+    echo '6）显示全部客户端 VLESS 链接'
+    echo '7）检查 Global 线路连接状态'
+    echo '8）修改 Global 公共参数'
+    echo '0）返回'
+    read -r -p '请选择：' action
+    case "$action" in
+      1) global_import_json ;;
+      2) global_manual_add ;;
+      3) local id; global_exit_list; id="$(ask_value '请输入Global线路ID' '')"; global_edit_exit "$id" ;;
+      4) global_remove_exit ;;
+      5) global_list_lines ;;
+      6) global_show_links ;;
+      7) global_status ;;
+      8) global_edit_profile ;;
+      0) return 0 ;;
+      *) warn '无效选项。' ;;
+    esac
+  done
 }
 line_manager_menu(){
   need_data
@@ -827,7 +1119,15 @@ rotate_reality(){
   show_links
 }
 config_check(){
+  local global_id
   "$BIN" check -c "$CONFIG_FILE"
+  while IFS= read -r global_id; do
+    [[ -n "$global_id" ]] || continue
+    if ! global_route_valid "$global_id"; then
+      warn "Global线路 $global_id 的狗妈用户、VLESS出站或路由规则不一致；请重新应用双节点配置。"
+      return 1
+    fi
+  done < <(jq -r '.global_exits[]? | select(.enabled != false) | .id' "$DATA_FILE")
   ok "sing-box 配置校验通过。"
 }
 service_status(){
@@ -867,14 +1167,36 @@ restore_menu(){
   ok "历史配置恢复完成。"
 }
 update_manager(){
-  local tmp
-  tmp="$(mktemp)"
-  info "正在从 GitHub 下载最新版 sb 管理脚本..."
-  curl -fsSL --retry 3 "$REPO_RAW/sb" -o "$tmp" || { rm -f "$tmp"; die "下载失败，请检查网络。"; }
-  bash -n "$tmp" || { rm -f "$tmp"; die "新脚本语法检查失败，未替换当前版本。"; }
-  install -m 0755 "$tmp" /usr/local/bin/sb
-  rm -f "$tmp"
-  ok "sb 管理脚本更新成功，正在重新载入新版菜单..."
+  local tmp helper_dir old_helper
+  if ! command -v python3 >/dev/null 2>&1; then
+    info "Global线路功能需要Python 3，正在安装管理脚本依赖..."
+    apk add --no-cache python3 || die "Python 3依赖安装失败，管理脚本未更新。"
+  fi
+  tmp="$(mktemp -d)"
+  helper_dir=/usr/local/libexec/sb
+  info "正在从 GitHub 下载最新版 sb 管理脚本及 Global 线路模块..."
+  curl -fsSL --retry 3 "$REPO_RAW/sb" -o "$tmp/sb" || { rm -rf "$tmp"; die "下载 sb 失败，请检查网络。"; }
+  curl -fsSL --retry 3 "$REPO_RAW/global_relay.py" -o "$tmp/global_relay.py" || { rm -rf "$tmp"; die "下载 Global 线路模块失败，现有脚本未替换。"; }
+  bash -n "$tmp/sb" || { rm -rf "$tmp"; die "新脚本语法检查失败，未替换当前版本。"; }
+  python3 -m py_compile "$tmp/global_relay.py" || { rm -rf "$tmp"; die "Global 线路模块语法检查失败，未替换当前版本。"; }
+  mkdir -p "$helper_dir"
+  old_helper="$tmp/global_relay.py.before"
+  if [[ -f "$helper_dir/global_relay.py" ]]; then cp -p "$helper_dir/global_relay.py" "$old_helper"; else old_helper=''; fi
+  install -m 0644 "$tmp/global_relay.py" "$helper_dir/global_relay.py.next"
+  install -m 0755 "$tmp/sb" /usr/local/bin/sb.next
+  mv -f "$helper_dir/global_relay.py.next" "$helper_dir/global_relay.py"
+  if ! mv -f /usr/local/bin/sb.next /usr/local/bin/sb; then
+    if [[ -n "$old_helper" ]]; then
+      install -m 0644 "$old_helper" "$helper_dir/global_relay.py.rollback"
+      mv -f "$helper_dir/global_relay.py.rollback" "$helper_dir/global_relay.py"
+    else
+      rm -f "$helper_dir/global_relay.py"
+    fi
+    rm -rf "$tmp"
+    die "管理脚本替换失败；Global 线路模块已回滚。"
+  fi
+  rm -rf "$tmp"
+  ok "sb 管理脚本及 Global 线路模块已更新；relay.json、UUID和运行配置未被更新脚本触碰。"
   exec /usr/local/bin/sb
 }
 update_core(){
@@ -1052,7 +1374,7 @@ setup(){
     --arg jp_public_key "$jp_public" --arg jp_short_id "$jp_short" --arg jp_sni "$jp_sni" \
     --arg entrance_name "$entrance_name" --arg direct_name "$direct_name" --arg jp_name "$jp_name" '
     {
-      schema_version:4,mode:"reality",extra_exits:[],
+      schema_version:5,mode:"reality",extra_exits:[],global_profiles:[],global_exits:[],
       entrance_name:$entrance_name,direct_name:$direct_name,jp_name:$jp_name,
       direct_enabled:true,jp_enabled:true,default_exit:"jp",
       public_host:$public_host,public_port:$public_port,
@@ -1136,6 +1458,7 @@ menu(){
 18）更新 sb 管理脚本（从 GitHub 拉取最新版）
 19）更新 sing-box 核心
 20）卸载 sing-box
+21）Global 多家宽管理
  0）退出
 MENU
     echo
@@ -1199,6 +1522,7 @@ MENU
           *) info "已取消。" ;;
         esac
         ;;
+      21) global_menu ;;
       0) exit 0 ;;
       *) warn "无效选项，请重新输入。" ;;
     esac

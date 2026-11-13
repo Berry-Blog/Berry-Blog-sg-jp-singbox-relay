@@ -33,6 +33,9 @@ curl -fsSL --retry 3 \
   "https://raw.githubusercontent.com/${REPO}/main/sb" \
   -o "$TMP/sb" || die "无法下载 sb 管理脚本。"
 bash -n "$TMP/sb" || die "sb 管理脚本 Bash 语法检查失败。"
+curl -fsSL --retry 3 \
+  "https://raw.githubusercontent.com/${REPO}/main/global_relay.py" \
+  -o "$TMP/global_relay.py" || die "无法下载 Global 线路管理模块。"
 
 echo "================================================"
 echo " SG-JP sing-box Relay 一键部署"
@@ -95,7 +98,8 @@ else
 fi
 
 info "安装依赖..."
-apk add --no-cache bash curl ca-certificates jq openssl tar coreutils net-tools
+apk add --no-cache bash curl ca-certificates jq openssl tar coreutils net-tools python3
+python3 -m py_compile "$TMP/global_relay.py" || die "Global 线路管理模块语法检查失败。"
 
 info "下载官方 sing-box ${VERSION} musl amd64..."
 curl -fL --retry 3 --connect-timeout 20 -o "$TMP/$ASSET" "$URL"
@@ -113,6 +117,8 @@ chmod 700 "$CONFIG_DIR"
 info "安装 sb 管理命令..."
 install -m 0755 "$TMP/sb" /usr/local/bin/sb
 ln -sf /usr/local/bin/sb /usr/bin/sb
+install -d -m 0755 /usr/local/libexec/sb
+install -m 0644 "$TMP/global_relay.py" /usr/local/libexec/sb/global_relay.py
 
 info "进入首次配置..."
 /usr/local/bin/sb setup
