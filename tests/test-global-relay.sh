@@ -80,7 +80,7 @@ jq -e '
 write_exports
 test "$(wc -l < "$URI_FILE" | tr -d '[:space:]')" = 7
 grep -Fq '178.94.15.19:30010' "$URI_FILE"
-grep -Fq '日本%20BIGLOBE' "$URI_FILE"
+grep -Fq '%E6%97%A5%E6%9C%AC%20BIGLOBE' "$URI_FILE"
 ! grep -Fq '11111111-1111-4111-8111-111111111111@' "$URI_FILE"
 grep -Fq 'sg-via-global-biglobe' "$CLASH_FILE"
 
@@ -96,3 +96,4 @@ test "$(jq -r '.extra_exits|length' "$DATA_FILE")" = 2
 jq -e '.outbounds[]|select(.tag=="to-extra-global-starhub" and .server=="209.33.166.81" and .server_port==40045)' "$CONFIG_FILE" >/dev/null
 
 echo "Global JSON preview/apply, v4→v5 migration, UUID separation, seven-user config, routes, links, Clash and isolated edit/delete checks passed."
+
