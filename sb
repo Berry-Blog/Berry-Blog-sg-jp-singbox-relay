@@ -281,7 +281,7 @@ render_config(){
             enabled:true,
             server_name:.sni,
             utls:{enabled:true,fingerprint:"chrome"},
-            reality:{enabled:true,public_key:.public_key,short_id:[.short_id]}
+            reality:{enabled:true,public_key:.public_key,short_id:.short_id}
           }
         } else {
           type:"shadowsocks",
