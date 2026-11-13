@@ -56,4 +56,4 @@ jobs:
 
       - name: Validate legacy migration, unified routes and exports
         run: |
-          bash -x tests/test-config.sh
+          bash tests/test-config.sh
