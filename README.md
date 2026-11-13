@@ -1,110 +1,87 @@
-# sing-box 新加坡多落地机中转管理（SG / JP / US / 更多）
+# sing-box 狗妈多线路统一管理（SG / JP / Global / US / 更多）
 
-为新加坡 GoMami 入口与日本 BIGLOBE、美国 PAV 等任意多个落地机设计的 Alpine/OpenRC 管理脚本。初始保留 SG Direct 与 SG → JP 两条线路，可额外添加多台 VLESS Reality 或 Shadowsocks 落地机。每条线路由不同客户端 UUID 独立路由，自动导出所有 VLESS 链接和 Clash Meta/Mihomo 配置。
-
-## 原有双节点工作方式（保留不变）
-
-两个客户端节点共用新加坡同一个 Reality 监听地址和端口，通过不同的 VLESS UUID 用户名路由：
-
-- **节点 A：新加坡直出**。VLESS 用户名为 `sg-direct`，流量由新加坡机器直接出站。
-- **节点 B：新加坡 → 日本 BIGLOBE**。VLESS 用户名为 `sg-via-jp`，流量继续使用现有日本 Reality（或后续配置的 SS）出站。
-
-路由使用 sing-box 的 VLESS 用户 `name` 与 route `auth_user` 匹配。新增节点不会重新生成或替换现有日本中转节点的 UUID、Reality 私钥、公钥和 Short ID。
+适用于 Alpine Linux x86_64 + OpenRC 的 sing-box 多落地机中转管理。狗妈作为统一 VLESS Reality 客户端入口，支持狗妈直出、日本 BIGLOBE、global、美国 PAV 及任意新增 Reality / Shadowsocks 出站线路。
 
 ## 一键安装
-
-仅支持 Alpine Linux x86_64 + OpenRC：
 
 ```sh
 apk add --no-cache bash curl && bash -c "$(curl -fsSL https://raw.githubusercontent.com/Berry-Blog/Berry-Blog-sg-jp-singbox-relay/main/install.sh)"
 ```
 
-安装器检测到旧 sing-box 文件时会询问是否清理。清理为可选项；不会删除 SSH、系统网络配置或历史备份。首次配置时服务器 IP/域名由管理员输入，端口可直接回车采用默认值，也可以输入自定义端口。
+仅首次部署时使用安装器。已经运行 sing-box 的机器升级管理脚本，不要重新运行安装器，也不要重新安装核心。
 
-## 已部署机器升级
+## 已部署机器更新管理面板
 
-如果机器已经安装旧版管理脚本，不要重新安装核心，也不要重新运行安装器。
+SSH 登录狗妈，执行：
 
-1. SSH 登录新加坡服务器。
-2. 输入 `sb`。
-3. 在旧版菜单中选择“更新 sb 管理脚本”（旧菜单编号 27）。
-4. 脚本从本 Public 仓库下载新版、先执行 `bash -n` 检查，再自动重新载入中文菜单。
-5. 在新版菜单选择“应用/修复全部节点路由配置”（编号 9）；新版菜单中的管理脚本更新功能仍为编号 30。
+```sh
+sb update
+```
 
-更新管理脚本本身不会立即改变正在运行的 sing-box 配置。旧版双节点不需要重装。新增落地机通过菜单 33 保存并触发配置校验、重启与备份；如果需要按当前参数重新生成配置，选择菜单 9。对新增落地机的变更失败会回滚参数和配置。
+也可以进入 `sb` 菜单，选择“更新 sb 管理脚本”。更新管理脚本不会重装 sing-box，也不会自动修改正在运行的节点配置。首次使用新版管理面板时，会把旧版 `relay.json` 自动迁移为 schema v4，保留现有 UUID、Reality 密钥、Short ID、端口、线路认证参数及订阅设置。
 
-也可以在服务器上执行 `sb update` 更新管理脚本。
+## 新版菜单
 
-## 中文菜单功能
+1. 线路总览：显示每条线路 ID、名称、协议、服务器地址、端口和默认出站。
+2. 显示线路认证参数。
+3. 导出所有 VLESS Reality 分享链接。
+4. 导出 Clash Meta / Mihomo YAML。
+5. 启用 Clash 远程订阅服务。
+6. 查看当前订阅链接。
+7. 更新订阅令牌。
+8. 关闭订阅服务。
+9. 应用/修复全部线路配置。
+10. 统一线路管理：添加、修改、删除、设置默认出站。
+11. 狗妈入口设置：入口名称、公网 IP/域名、公网映射端口、内部监听地址/端口、入口 Reality SNI。
+12. sing-box 配置检查。
+13. 服务启动、停止、重启。
+14. 服务状态及监听端口。
+15. 最近日志。
+16. 手动备份。
+17. 恢复历史备份。
+18. 更新 sb 管理脚本。
+19. 更新 sing-box 核心。
+20. 卸载。
 
-- 查看双节点状态与参数
-- 明文显示新加坡、日本两侧 UUID、Reality Private/Public Key、Short ID
-- 生成全部独立 VLESS Reality 一键导入链接（2 条原线路 + N 条新增线路）
-- 生成 Clash Meta / Mihomo YAML 配置文件
-- 启用本机 Clash 订阅文件服务并生成 HTTPS 订阅地址；落地机变更后订阅文件自动更新
-- 修改新加坡/日本 IP、端口、UUID、Public Key、Short ID、SNI
-- 单独重新生成新加坡直出 UUID
-- 轮换新加坡 Reality 密钥
-- Reality / Shadowsocks 日本出站切换
-- 配置校验、服务启停、日志、备份恢复、核心更新和卸载
+## 统一线路管理
 
-## 导出文件
+所有线路在同一管理界面中操作：
 
-菜单 3 和菜单 4 是两个不同的导出方式，不是重复功能：
+- **狗妈直出（direct）**：可修改线路名称、狗妈入口 IP/域名、映射端口及直出客户端 UUID。
+- **日本 BIGLOBE（jp）**：可修改名称、落地服务器 IP/域名、端口、Reality / SS 协议及对应认证参数。
+- **其他落地线路**：可添加、修改、删除 global、美国 PAV 及其他线路。每条线路可修改名称、服务器 IP/域名、服务器端口、协议、落地 UUID、Reality Public Key、Short ID、SNI，或 SS 加密方式和密码。
+- **默认出站**：可将任意已启用线路设置为默认出站。
+- 删除内置直出或日本线路后，可以从“添加线路”菜单重新启用；其他线路可以直接删除和重新添加。
 
-- **菜单 3：VLESS 分享链接**。生成两个独立的 VLESS URI，文件 `/etc/sing-box/export/vless.txt` 只包含两条 URI，方便逐条复制或批量导入。
-- **菜单 4：本地 Clash 配置文件**。生成包含两个节点及手动选择策略组的 YAML，保存到 `/etc/sing-box/export/clash.yaml`。通过 SCP 下载后，在 Clash Meta / Mihomo 中从文件导入。
-- **菜单 5：远程订阅服务**。不是再次生成本地 YAML，而是启动本机静态文件服务，让 Clash 客户端可以通过 HTTPS 订阅地址自动更新 YAML。
+新增线路时会生成独立的狗妈入口客户端 UUID。修改线路时默认保留现有客户端 UUID；落地 UUID、Reality 公钥、Short ID、SNI、SS 密码等均按输入值更新。脚本只管理狗妈端的出站和路由，不会远程修改落地机本身。
 
-## Clash 远程订阅地址
+## 狗妈入口设置
 
-菜单 5 可以启用一个轻量本机静态文件服务：
+入口参数与落地线路参数分开管理。可修改入口名称、公网 IP/域名、公网映射端口、内部监听地址、内部监听端口及入口 Reality SNI。修改公网映射端口或内部监听端口后，需要同步调整服务商端口映射。修改入口 Reality SNI 后，客户端及外部中转的 SNI 也需要同步。
 
-- Alpine 的 HTTP applet 由 `busybox-extras` 包提供，实际执行文件为 `/bin/busybox-extras`；不能用基础 `/bin/busybox --list` 判断扩展 applet 是否存在。
-- 默认仅监听 `127.0.0.1:18080`，不直接开放公网端口
-- 生成随机长令牌路径，订阅文件不放在公开仓库
-- 要获得可用的远程订阅 URL，需自行将 HTTPS 域名、Cloudflare Tunnel 或 HTTPS 反向代理转发到脚本显示的本机上游地址
-- 订阅 URL 包含随机访问令牌，等同于节点凭据；不要公开分享
-- 脚本不会擅自增加商家公网端口映射，也不会自动替用户创建 DNS、证书或 Cloudflare Tunnel
+入口 Reality UUID 用户、Private Key、Public Key、Short ID 不会因为修改线路名称、IP、端口或切换家宽而自动重新生成。
 
-如果尚未配置 HTTPS 反向代理，可先使用本地 Clash YAML 文件导入，不要把含节点凭据的 YAML 放在公开 GitHub 仓库或通过明文 HTTP 公开传输。
+## 配置与导出
 
-## 多落地机管理（2026-11-12）
+- 本地参数：`/etc/sing-box/relay.json`
+- sing-box 运行配置：`/etc/sing-box/config.json`
+- VLESS 分享链接：`/etc/sing-box/export/vless.txt`
+- Clash YAML：`/etc/sing-box/export/clash.yaml`
+- 历史备份：`/root/sb-relay-backups/`
+- 管理脚本：`/usr/local/bin/sb`
 
-新版 `sb` 在原菜单末尾新增以下功能，不改动其他菜单编号：
+线路变更后会重新生成 VLESS 链接、Clash YAML 和已启用的订阅文件。所有客户端仍连接狗妈统一 Reality 入口，由不同 UUID 用户路由到不同出站线路。
 
-- **33：添加落地机**。填写 ID（例如 `us-pav`）、显示名称、落地协议 `reality` 或 `ss`、公网地址、映射端口及对应的远端认证参数。脚本自动生成一条独立的 **新加坡客户端 UUID**。
-- **34：查看落地机**。显示新增线路的 ID、协议、目的地址和客户端 UUID。
-- **35：修改落地机**。可以修改名称、落地 IP/端口和远端密钥，按需重新生成该线路客户端 UUID。
-- **36：删除落地机**。仅移除选中的新增路由、配置和客户端链接，不删除原日本 BIGLOBE 或新加坡直出。
-- **3：查看全部 VLESS 链接**。输出 `SG-Direct`、`SG-via-JP` 和 `SG-via-<id>`，每行一个 URI；文件 `/etc/sing-box/export/vless.txt`。
-- **4：导出完整 Clash YAML**。将全部客户端节点添加到同一选择策略组；文件 `/etc/sing-box/export/clash.yaml`。
-- **30：更新管理脚本**。从本仓库 `main` 下载，进行 Bash 语法检查，并载入新菜单；也可执行 `sb update`。
+## 订阅
 
-例如新增美国 PAV 后，客户端仍连接 **新加坡 GoMami 的原 Reality 入口 IP/端口和公钥**，但使用新生成的 `SG-via-us-pav` UUID。新加坡 sing-box 根据用户名转发至美国 PAV；原 `SG-via-JP` UUID 和路线保持不变。
+订阅服务仅监听本机回环地址，外部访问需要用户自行配置 HTTPS 域名、Cloudflare Tunnel 或反向代理。订阅文件包含节点凭据，不要公开分享。
 
-**注意：菜单 33 只配置新加坡中转端，不会远程登录或安装美国 PAV 落地机。** 新落地机必须预先运行对应 VLESS Reality 或 Shadowsocks 入站，并允许新加坡连接其公网 TCP 端口（如果是 NAT VPS，填写商家映射后的公网端口）。`Reality UUID/Public Key/Short ID/SNI` 必须与远端实际配置一致。未配置美国 PAV 时，不应认为新增客户端已经可以连通。
+## 运行环境与说明
 
-新增和修改会自动备份当前配置、运行 `sing-box check`，再重启主服务；如果配置校验或重启失败会回滚。GitHub Actions 使用随机测试凭据验证多路由 JSON、两种落地协议、多条链接、YAML 格式及增加/修改/删除后的配置一致性。这些离线检查不等于实际跨境连通性测试。
-
-## 安全说明
-
-- 公开仓库只保存通用脚本，不保存真实服务器 IP、UUID、Reality 密钥、Short ID 或订阅令牌。
-- 本地参数文件 `/etc/sing-box/relay.json` 权限为 root-only（600）。
-- 用户明确要求凭据在 SSH 终端明文显示；菜单 2 会展示完整参数。请不要在公开录屏、截图或聊天中暴露这些内容。
-- 当前节点端口映射为 TCP；Clash 配置按 TCP Reality 生成，不宣称已启用 UDP。
-- 修改端口后，需要在商家面板同步修改端口映射。
-- 修改日本落地 UUID/Public Key/Short ID 后，必须与日本 BIGLOBE 实际入站配置一致。此脚本只管理新加坡机器，不会远程修改日本服务器。
-
-## 本地文件
-
-- `/etc/sing-box/relay.json`：本地参数及认证凭据（600），新增落地机保存在 `extra_exits[]` 中
-- `/etc/sing-box/config.json`：sing-box 运行配置（600）
-- `/etc/sing-box/export/vless.txt`：两个 VLESS 分享链接（600）
-- `/etc/sing-box/export/clash.yaml`：Clash Meta/Mihomo 配置（600）
-- `/root/sb-relay-backups/`：修改前自动备份
-- `/usr/local/bin/sb`：中文管理命令
-
-## 参考
-
-管理菜单和节点导出体验参考 [yonggekkk/sing-box-yg](https://github.com/yonggekkk/sing-box-yg)；双节点路由和参数管理为本项目按 SG-JP 架构定制。
+- Alpine Linux x86_64 + OpenRC。
+- 当前入口与导出的客户端节点为 VLESS Reality / TCP。
+- 额外落地支持 VLESS Reality 和 Shadowsocks 出站。
+- Shadowsocks 落地必须预先在远端部署匹配的 SS 入站，并确保狗妈能访问其公网映射端口。
+- Reality 落地 UUID、Public Key、Short ID、SNI 必须与远端入站保持一致。
+- 脚本不会自动修改云服务商防火墙或端口映射。
+- GitHub Actions 运行配置与多线路增删改回归测试；测试不代表真实跨境网络连通性。
