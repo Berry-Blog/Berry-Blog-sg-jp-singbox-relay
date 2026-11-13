@@ -961,14 +961,15 @@ global_show_links(){
   done < <(line_array | jq -c '.[] | select(.global==true)')
 }
 global_route_valid(){
-  local item id user outbound
-  item="$(get_line_json "$1")" || return 1
-  id="$(jq -r '.id' <<< "$item")"; user="sg-via-$id"; outbound="to-extra-$id"
-  jq -e --arg id "$id" --arg user "$user" --arg outbound "$outbound" --argjson item "$item" '
-    any(.inbounds[]? | .users[]?; .name==$user and .uuid==$item.client_uuid) and
-    any(.outbounds[]?; .tag==$outbound and .type=="vless" and .server==$item.host and .server_port==$item.port and .uuid==$item.uuid) and
-    any(.route.rules[]?; .auth_user==[$user] and .outbound==$outbound)
-  ' "$CONFIG_FILE" >/dev/null
+  local id="$1" user="sg-via-$1" outbound="to-extra-$1"
+  jq -e -n --arg id "$id" --arg user "$user" --arg outbound "$outbound" \
+    --slurpfile state "$DATA_FILE" --slurpfile config "$CONFIG_FILE" '
+    ($state[0].global_exits[]? | select(.id==$id and (.enabled // true)==true)) as $exit |
+    ($state[0].global_profiles[]? | select(.profile_id==$exit.profile_id)) as $profile |
+    any($config[0].inbounds[]? | .users[]?; .name==$user and .uuid==$exit.client_uuid) and
+    any($config[0].outbounds[]?; .tag==$outbound and .type=="vless" and .server==$profile.server and .server_port==$profile.public_port and .uuid==$exit.global_uuid) and
+    any($config[0].route.rules[]?; .auth_user==[$user] and .outbound==$outbound)
+  ' >/dev/null
 }
 global_probe_line(){
   local item id host remote_port uuid public_key short_id sni flow expected test_port tmp pid ip reality tcp route ip_status
