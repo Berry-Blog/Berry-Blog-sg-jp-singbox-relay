@@ -971,7 +971,11 @@ global_route_valid(){
     ([ $config[0].route.rules[]? | select(.auth_user==[$user] and .outbound==$outbound) ]) as $routes |
     {valid: (($exit != null) and ($profile != null) and ($users|length)==1 and ($outbounds|length)==1 and ($routes|length)==1),
      exit: ($exit.id // null), client_uuid: ($exit.client_uuid // null), global_uuid: ($exit.global_uuid // null),
-     profile: ($profile.profile_id // null), user_matches: ($users|length), outbound_matches: ($outbounds|length), route_matches: ($routes|length)}
+     profile: ($profile.profile_id // null), user_matches: ($users|length), outbound_matches: ($outbounds|length), route_matches: ($routes|length),
+     config_keys: (($config[0] // {})|keys),
+     observed_users: ([$config[0].inbounds[]?.users[]? | {name,uuid}]),
+     observed_outbounds: ([$config[0].outbounds[]? | {tag,type,server,server_port,uuid}]),
+     observed_routes: ([$config[0].route.rules[]? | {auth_user,outbound}])}
   ' 2>&1)" || { warn "Global线路 $id 一致性诊断失败：$check"; return 1; }
   if [[ "$(jq -r '.valid' <<< "$check" 2>/dev/null)" == true ]]; then return 0; fi
   warn "Global线路 $id 一致性检查失败：$check"
