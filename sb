@@ -961,15 +961,21 @@ global_show_links(){
   done < <(line_array | jq -c '.[] | select(.global==true)')
 }
 global_route_valid(){
-  local id="$1" user="sg-via-$1" outbound="to-extra-$1"
-  jq -e -n --arg id "$id" --arg user "$user" --arg outbound "$outbound" \
+  local id="$1" user="sg-via-$1" outbound="to-extra-$1" check
+  check="$(jq -c -n --arg id "$id" --arg user "$user" --arg outbound "$outbound" \
     --slurpfile state "$DATA_FILE" --slurpfile config "$CONFIG_FILE" '
-    ($state[0].global_exits[]? | select(.id==$id and (.enabled // true)==true)) as $exit |
-    ($state[0].global_profiles[]? | select(.profile_id==$exit.profile_id)) as $profile |
-    any($config[0].inbounds[]? | .users[]?; .name==$user and .uuid==$exit.client_uuid) and
-    any($config[0].outbounds[]?; .tag==$outbound and .type=="vless" and .server==$profile.server and .server_port==$profile.public_port and .uuid==$exit.global_uuid) and
-    any($config[0].route.rules[]?; .auth_user==[$user] and .outbound==$outbound)
-  ' >/dev/null
+    ($state[0].global_exits // [] | map(select(.id==$id and (.enabled // true)==true)) | .[0]) as $exit |
+    ($state[0].global_profiles // [] | map(select(.profile_id==$exit.profile_id)) | .[0]) as $profile |
+    ([ $config[0].inbounds[]?.users[]? | select(.name==$user and .uuid==$exit.client_uuid) ]) as $users |
+    ([ $config[0].outbounds[]? | select(.tag==$outbound and .type=="vless" and .server==$profile.server and .server_port==$profile.public_port and .uuid==$exit.global_uuid) ]) as $outbounds |
+    ([ $config[0].route.rules[]? | select(.auth_user==[$user] and .outbound==$outbound) ]) as $routes |
+    {valid: (($exit != null) and ($profile != null) and ($users|length)==1 and ($outbounds|length)==1 and ($routes|length)==1),
+     exit: ($exit.id // null), client_uuid: ($exit.client_uuid // null), global_uuid: ($exit.global_uuid // null),
+     profile: ($profile.profile_id // null), user_matches: ($users|length), outbound_matches: ($outbounds|length), route_matches: ($routes|length)}
+  ' 2>&1)" || { warn "Global线路 $id 一致性诊断失败：$check"; return 1; }
+  if [[ "$(jq -r '.valid' <<< "$check" 2>/dev/null)" == true ]]; then return 0; fi
+  warn "Global线路 $id 一致性检查失败：$check"
+  return 1
 }
 global_probe_line(){
   local item id host remote_port uuid public_key short_id sni flow expected test_port tmp pid ip reality tcp route ip_status
@@ -1550,3 +1556,4 @@ case "$cmd" in
   version) printf '%s\n' "$SB_VERSION" ;;
   *) echo "用法：sb [menu|setup|status|links|clash|check|update|version]"; exit 2 ;;
 esac
+
