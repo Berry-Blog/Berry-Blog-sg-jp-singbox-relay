@@ -405,7 +405,6 @@ EOF
   chmod 600 "$CLASH_FILE"
 }
 sync_subscription_file(){
-sync_subscription_file(){
   local token
   token="$(get sub_token)"
   [[ -n "$token" ]] || return 0
