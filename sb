@@ -3,7 +3,7 @@ set -Eeuo pipefail
 export LANG=C.UTF-8
 
 REPO_RAW="https://raw.githubusercontent.com/Berry-Blog/Berry-Blog-sg-jp-singbox-relay/main"
-SB_VERSION="2026-11-12-multi-exit-1"
+SB_VERSION="2026-11-13-unified-lines-1"
 CONFIG_DIR="/etc/sing-box"
 DATA_FILE="$CONFIG_DIR/relay.json"
 CONFIG_FILE="$CONFIG_DIR/config.json"
@@ -34,6 +34,94 @@ valid_exit_name(){ [[ -n "$1" && "$1" != *$'\r'* && "$1" != *$'\n'* ]]; }
 valid_short_or_empty(){ [[ -z "$1" ]] || valid_short "$1"; }
 valid_ss_method(){ case "$1" in 2022-blake3-aes-128-gcm|aes-128-gcm|chacha20-ietf-poly1305) return 0;; *) return 1;; esac; }
 yaml_quote(){ jq -nr --arg s "$1" '$s|@json'; }
+
+
+set_bool(){
+  local key="$1" value="$2" tmp
+  tmp="$(mktemp "$CONFIG_DIR/relay.json.XXXXXX")"
+  jq --arg k "$key" --argjson v "$value" '.[$k]=$v' "$DATA_FILE" > "$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$DATA_FILE"
+}
+migrate_legacy_data(){
+  [[ -s "$DATA_FILE" ]] || return 0
+  local tmp
+  tmp="$(mktemp "$CONFIG_DIR/relay.json.migrate.XXXXXX")"
+  jq '
+    .schema_version=4
+    | .entrance_name=(.entrance_name // "狗妈")
+    | .direct_name=(.direct_name // "狗妈直出")
+    | .jp_name=(.jp_name // "日本 BIGLOBE")
+    | .direct_enabled=(if has("direct_enabled") then .direct_enabled else true end)
+    | .jp_enabled=(if has("jp_enabled") then .jp_enabled else true end)
+    | .extra_exits=((.extra_exits // []) | map(.name=(.name // .id)))
+    | .default_exit=(.default_exit // (if (.jp_enabled // true) then "jp" elif (.direct_enabled // true) then "direct" else ((.extra_exits[0].id) // "direct") end))
+  ' "$DATA_FILE" > "$tmp"
+  chmod 600 "$tmp"
+  if ! cmp -s "$tmp" "$DATA_FILE"; then mv -f "$tmp" "$DATA_FILE"; else rm -f "$tmp"; fi
+}
+line_array(){
+  need_data
+  jq -c '
+    [
+      (if (.direct_enabled // true) then {
+        id:"direct",name:(.direct_name // "狗妈直出"),protocol:"direct",
+        host:.public_host,port:.public_port,client_uuid:.direct_uuid
+      } else empty end),
+      (if (.jp_enabled // true) then {
+        id:"jp",name:(.jp_name // "日本 BIGLOBE"),protocol:(.mode // "reality"),
+        host:.jp_host,port:(if .mode=="ss" then (.jp_ss_port // .jp_port) else .jp_port end),
+        client_uuid:.inbound_uuid,uuid:.jp_uuid,public_key:.jp_public_key,
+        short_id:.jp_short_id,sni:.jp_sni,method:.jp_ss_method,password:.jp_ss_password
+      } else empty end)
+    ] + ((.extra_exits // []) | map({
+      id:.id,name:(.name // .id),protocol:.protocol,host:.host,port:.port,
+      client_uuid:.client_uuid,uuid:(.uuid // ""),public_key:(.public_key // ""),
+      short_id:(.short_id // ""),sni:(.sni // ""),
+      method:(.method // ""),password:(.password // "")
+    }))
+  ' "$DATA_FILE"
+}
+line_exists(){
+  local id="$1"
+  case "$id" in
+    direct) jq -e '(.direct_enabled // true)==true' "$DATA_FILE" >/dev/null ;;
+    jp) jq -e '(.jp_enabled // true)==true' "$DATA_FILE" >/dev/null ;;
+    *) extra_exists "$id" ;;
+  esac
+}
+get_line_json(){
+  local id="$1"
+  case "$id" in
+    direct)
+      jq -c '{id:"direct",name:(.direct_name // "狗妈直出"),protocol:"direct",host:.public_host,port:.public_port,client_uuid:.direct_uuid}' "$DATA_FILE"
+      ;;
+    jp)
+      jq -c '{id:"jp",name:(.jp_name // "日本 BIGLOBE"),protocol:(.mode // "reality"),host:.jp_host,port:(if .mode=="ss" then (.jp_ss_port // .jp_port) else .jp_port end),client_uuid:.inbound_uuid,uuid:.jp_uuid,public_key:.jp_public_key,short_id:.jp_short_id,sni:.jp_sni,method:.jp_ss_method,password:.jp_ss_password}' "$DATA_FILE"
+      ;;
+    *)
+      jq -c --arg id "$id" '.extra_exits[] | select(.id==$id)' "$DATA_FILE"
+      ;;
+  esac
+}
+list_lines(){
+  need_data
+  printf '\n========== 全部线路 ==========\n'
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    jq -r '"ID=\(.id) | 名称=\(.name) | 类型=\(.protocol) | 服务器=\(.host):\(.port) | 客户端UUID=\(.client_uuid)"' <<< "$item"
+  done < <(line_array)
+  printf '默认出站：%s\n' "$(get default_exit)"
+}
+select_line_id(){
+  local id
+  list_lines >&2
+  id="$(ask_value '请输入线路 ID（direct / jp / 其他线路ID）' '')"
+  [[ "$id" == "direct" || "$id" == "jp" ]] || valid_exit_id "$id" || { warn "线路 ID 格式错误。"; return 1; }
+  line_exists "$id" || { warn "没有找到启用中的这条线路。"; return 1; }
+  printf '%s' "$id"
+}
+
 
 
 ask_value(){
@@ -128,29 +216,32 @@ ensure_direct_uuid(){
   fi
 }
 
+
 render_config(){
   need_data
-  ensure_direct_uuid
+  local lines default_exit
+  lines="$(line_array)"
+  [[ "$lines" != "[]" ]] || die "至少需要保留一条启用线路。"
+  default_exit="$(get default_exit)"
+  if ! jq -e --arg id "$default_exit" 'any(.[]; .id==$id)' <<< "$lines" >/dev/null; then
+    default_exit="$(jq -r '.[0].id' <<< "$lines")"
+    set_string default_exit "$default_exit"
+  fi
   jq -n \
     --arg listen "$(get listen_address)" \
     --argjson listen_port "$(get listen_port)" \
-    --arg in_uuid "$(get inbound_uuid)" \
-    --arg direct_uuid "$(get direct_uuid)" \
     --arg in_private "$(get inbound_private_key)" \
     --arg in_short "$(get inbound_short_id)" \
     --arg in_sni "$(get inbound_sni)" \
     --arg in_handshake "$(get inbound_handshake)" \
-    --arg jp_host "$(get jp_host)" \
-    --argjson jp_port "$(get jp_port)" \
-    --arg jp_uuid "$(get jp_uuid)" \
-    --arg jp_public "$(get jp_public_key)" \
-    --arg jp_short "$(get jp_short_id)" \
-    --arg jp_sni "$(get jp_sni)" \
-    --arg ss_method "$(get jp_ss_method)" \
-    --arg ss_password "$(get jp_ss_password)" \
-    --argjson ss_port "$(get jp_ss_port)" \
-    --arg mode "$(get mode)" \
-    --argjson extra_exits "$(jq -c '.extra_exits // []' "$DATA_FILE")" '
+    --arg default_exit "$default_exit" \
+    --argjson lines "$lines" '
+    def outbound_tag:
+      if .id=="direct" then "sg-direct-out"
+      elif .id=="jp" then (if .protocol=="ss" then "to-jp-ss" else "to-jp-reality" end)
+      else "to-extra-" + .id end;
+    ($lines | map(select(.id==$default_exit)) | .[0]) as $selected_default |
+    ($selected_default // $lines[0]) as $default_line |
     {
       log:{level:"warn",timestamp:true},
       inbounds:[{
@@ -158,16 +249,11 @@ render_config(){
         tag:"sg-reality-in",
         listen:$listen,
         listen_port:$listen_port,
-        users:(
-          [
-            {name:"sg-direct",uuid:$direct_uuid,flow:"xtls-rprx-vision"},
-            {name:"sg-via-jp",uuid:$in_uuid,flow:"xtls-rprx-vision"}
-          ] + ($extra_exits | map({
-            name:("sg-via-" + .id),
-            uuid:.client_uuid,
-            flow:"xtls-rprx-vision"
-          }))
-        ),
+        users:($lines | map({
+          name:(if .id=="direct" then "sg-direct" else "sg-via-" + .id end),
+          uuid:.client_uuid,
+          flow:"xtls-rprx-vision"
+        })),
         tls:{
           enabled:true,
           server_name:$in_sni,
@@ -179,75 +265,46 @@ render_config(){
           }
         }
       }],
-      outbounds:(
-        [{type:"direct",tag:"sg-direct-out"}] +
-        (if $mode=="reality" then [{
+      outbounds:($lines | map(
+        if .protocol=="direct" then {
+          type:"direct",
+          tag:"sg-direct-out"
+        } elif .protocol=="reality" then {
           type:"vless",
-          tag:"to-jp-reality",
-          server:$jp_host,
-          server_port:$jp_port,
-          uuid:$jp_uuid,
+          tag:(if .id=="jp" then "to-jp-reality" else "to-extra-" + .id end),
+          server:.host,
+          server_port:.port,
+          uuid:.uuid,
           flow:"xtls-rprx-vision",
           network:"tcp",
           tls:{
             enabled:true,
-            server_name:$jp_sni,
+            server_name:.sni,
             utls:{enabled:true,fingerprint:"chrome"},
-            reality:{enabled:true,public_key:$jp_public,short_id:$jp_short}
+            reality:{enabled:true,public_key:.public_key,short_id:[.short_id]}
           }
-        }] else [{
+        } else {
           type:"shadowsocks",
-          tag:"to-jp-ss",
-          server:$jp_host,
-          server_port:$ss_port,
-          method:$ss_method,
-          password:$ss_password,
+          tag:(if .id=="jp" then "to-jp-ss" else "to-extra-" + .id end),
+          server:.host,
+          server_port:.port,
+          method:.method,
+          password:.password,
           network:"tcp"
-        }] end) +
-        ($extra_exits | map(
-          if .protocol=="reality" then {
-            type:"vless",
-            tag:("to-extra-" + .id),
-            server:.host,
-            server_port:.port,
-            uuid:.uuid,
-            flow:"xtls-rprx-vision",
-            network:"tcp",
-            tls:{
-              enabled:true,
-              server_name:.sni,
-              utls:{enabled:true,fingerprint:"chrome"},
-              reality:{enabled:true,public_key:.public_key,short_id:.short_id}
-            }
-          } else {
-            type:"shadowsocks",
-            tag:("to-extra-" + .id),
-            server:.host,
-            server_port:.port,
-            method:.method,
-            password:.password,
-            network:"tcp"
-          } end
-        ))
-      ),
+        } end
+      )),
       route:{
-        rules:(
-          [{
-            inbound:["sg-reality-in"],
-            auth_user:["sg-direct"],
-            action:"route",
-            outbound:"sg-direct-out"
-          }] + ($extra_exits | map({
-            inbound:["sg-reality-in"],
-            auth_user:[("sg-via-" + .id)],
-            action:"route",
-            outbound:("to-extra-" + .id)
-          }))
-        ),
-        final:(if $mode=="reality" then "to-jp-reality" else "to-jp-ss" end)
+        rules:($lines | map(. as $line | {
+          inbound:["sg-reality-in"],
+          auth_user:[if $line.id=="direct" then "sg-direct" else "sg-via-" + $line.id end],
+          action:"route",
+          outbound:($line | outbound_tag)
+        })),
+        final:($default_line | outbound_tag)
       }
     }'
 }
+render_apply(){
 render_apply(){
   local tmp
   tmp="$(mktemp "$CONFIG_DIR/config.json.XXXXXX")"
@@ -263,38 +320,36 @@ render_apply(){
 format_host(){
   if [[ "$1" == *:* && "$1" != \[*\] ]]; then printf '[%s]' "$1"; else printf '%s' "$1"; fi
 }
+
 write_vless_links(){
   need_data
-  [[ -n "$(get direct_uuid)" ]] || die "请先选择菜单 9 应用节点配置，再生成链接。"
   mkdir -p "$EXPORT_DIR"
   chmod 700 "$EXPORT_DIR"
-  local host direct_uri jp_uri extra id client_uuid uri
+  local host item id name uuid label
   host="$(format_host "$(get public_host)")"
-  direct_uri="vless://$(get direct_uuid)@$host:$(get public_port)?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(get inbound_sni)&fp=chrome&pbk=$(get inbound_public_key)&sid=$(get inbound_short_id)&type=tcp&headerType=none#SG-Direct"
-  jp_uri="vless://$(get inbound_uuid)@$host:$(get public_port)?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(get inbound_sni)&fp=chrome&pbk=$(get inbound_public_key)&sid=$(get inbound_short_id)&type=tcp&headerType=none#SG-via-JP"
-  {
-    printf '%s\n' "$direct_uri"
-    printf '%s\n' "$jp_uri"
-    while IFS= read -r extra; do
-      [[ -n "$extra" ]] || continue
-      id="$(jq -r '.id' <<< "$extra")"
-      client_uuid="$(jq -r '.client_uuid' <<< "$extra")"
-      uri="vless://$client_uuid@$host:$(get public_port)?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(get inbound_sni)&fp=chrome&pbk=$(get inbound_public_key)&sid=$(get inbound_short_id)&type=tcp&headerType=none#SG-via-$id"
-      printf '%s\n' "$uri"
-    done < <(jq -c '.extra_exits[]?' "$DATA_FILE")
-  } > "$URI_FILE"
+  : > "$URI_FILE"
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    id="$(jq -r '.id' <<< "$item")"
+    name="$(jq -r '.name' <<< "$item")"
+    uuid="$(jq -r '.client_uuid' <<< "$item")"
+    label="$name"
+    if [[ "$id" != "direct" && "$id" != "jp" ]]; then label="$name [$id]"; fi
+    label="$(jq -nr --arg s "$label" '$s|@uri')"
+    printf 'vless://%s@%s:%s?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp&headerType=none#%s\n' \
+      "$uuid" "$host" "$(get public_port)" "$(get inbound_sni)" "$(get inbound_public_key)" "$(get inbound_short_id)" "$label" >> "$URI_FILE"
+  done < <(line_array)
   chmod 600 "$URI_FILE"
 }
 write_clash_yaml(){
   need_data
-  [[ -n "$(get direct_uuid)" ]] || die "请先选择菜单 9 应用节点配置，再生成 Clash 配置。"
   mkdir -p "$EXPORT_DIR"
   chmod 700 "$EXPORT_DIR"
-  local extra id name label
+  local item id name label
   {
     cat <<EOF
-# sing-box 多出口节点；全部客户端仍连接新加坡 Reality 入口
-# 适用于 Clash Meta / Mihomo；仅配置 TCP Reality 节点
+# sing-box 多出口节点；所有客户端连接狗妈统一 Reality 入口
+# 适用于 Clash Meta / Mihomo；当前为 TCP Reality 入口
 mixed-port: 7890
 allow-lan: false
 mode: rule
@@ -302,47 +357,19 @@ log-level: info
 ipv6: false
 
 proxies:
-  - name: "新加坡直出"
-    type: vless
-    server: "$(get public_host)"
-    port: $(get public_port)
-    uuid: "$(get direct_uuid)"
-    network: tcp
-    tls: true
-    udp: false
-    flow: xtls-rprx-vision
-    servername: "$(get inbound_sni)"
-    client-fingerprint: chrome
-    reality-opts:
-      public-key: "$(get inbound_public_key)"
-      short-id: "$(get inbound_short_id)"
-
-  - name: "新加坡-日本 BIGLOBE 家宽"
-    type: vless
-    server: "$(get public_host)"
-    port: $(get public_port)
-    uuid: "$(get inbound_uuid)"
-    network: tcp
-    tls: true
-    udp: false
-    flow: xtls-rprx-vision
-    servername: "$(get inbound_sni)"
-    client-fingerprint: chrome
-    reality-opts:
-      public-key: "$(get inbound_public_key)"
-      short-id: "$(get inbound_short_id)"
 EOF
-    while IFS= read -r extra; do
-      [[ -n "$extra" ]] || continue
-      id="$(jq -r '.id' <<< "$extra")"
-      name="$(jq -r '.name' <<< "$extra")"
-      label="$name [$id]"
-      printf '\n  - name: %s\n' "$(yaml_quote "$label")"
+    while IFS= read -r item; do
+      [[ -n "$item" ]] || continue
+      id="$(jq -r '.id' <<< "$item")"
+      name="$(jq -r '.name' <<< "$item")"
+      label="$name"
+      if [[ "$id" != "direct" && "$id" != "jp" ]]; then label="$name [$id]"; fi
+      printf '  - name: %s\n' "$(yaml_quote "$label")"
       cat <<EOF
     type: vless
     server: "$(get public_host)"
     port: $(get public_port)
-    uuid: "$(jq -r '.client_uuid' <<< "$extra")"
+    uuid: "$(jq -r '.client_uuid' <<< "$item")"
     network: tcp
     tls: true
     udp: false
@@ -353,22 +380,22 @@ EOF
       public-key: "$(get inbound_public_key)"
       short-id: "$(get inbound_short_id)"
 EOF
-    done < <(jq -c '.extra_exits[]?' "$DATA_FILE")
+    done < <(line_array)
     cat <<'EOF'
 
 proxy-groups:
   - name: "节点选择"
     type: select
     proxies:
-      - "新加坡直出"
-      - "新加坡-日本 BIGLOBE 家宽"
 EOF
-    while IFS= read -r extra; do
-      [[ -n "$extra" ]] || continue
-      id="$(jq -r '.id' <<< "$extra")"
-      name="$(jq -r '.name' <<< "$extra")"
-      printf '      - %s\n' "$(yaml_quote "$name [$id]")"
-    done < <(jq -c '.extra_exits[]?' "$DATA_FILE")
+    while IFS= read -r item; do
+      [[ -n "$item" ]] || continue
+      id="$(jq -r '.id' <<< "$item")"
+      name="$(jq -r '.name' <<< "$item")"
+      label="$name"
+      if [[ "$id" != "direct" && "$id" != "jp" ]]; then label="$name [$id]"; fi
+      printf '      - %s\n' "$(yaml_quote "$label")"
+    done < <(line_array)
     cat <<'EOF'
       - DIRECT
 
@@ -378,6 +405,7 @@ EOF
   } > "$CLASH_FILE"
   chmod 600 "$CLASH_FILE"
 }
+sync_subscription_file(){
 sync_subscription_file(){
   local token
   token="$(get sub_token)"
@@ -389,81 +417,67 @@ sync_subscription_file(){
   cp -f "$CLASH_FILE" "$SUB_ROOT/$token/clash.yaml"
   chmod 644 "$SUB_ROOT/$token/clash.yaml"
 }
+
 write_exports(){
-  [[ -n "$(get direct_uuid)" ]] || return 0
+  need_data
   write_vless_links
   write_clash_yaml
   sync_subscription_file
 }
 show_info(){
   need_data
-  printf '\n========== 多出口节点信息 ==========\n'
-  printf '原日本模式：%s\n' "$(get mode)"
-  printf '新加坡公网入口：%s:%s\n' "$(get public_host)" "$(get public_port)"
-  printf '新加坡监听：%s:%s/TCP\n' "$(get listen_address)" "$(get listen_port)"
-  printf '节点 A：新加坡直出（UUID：%s）\n' "$(get direct_uuid)"
-  printf '节点 B：新加坡中转日本（UUID：%s）\n' "$(get inbound_uuid)"
-  printf '日本 BIGLOBE：%s:%s\n' "$(get jp_host)" "$(get jp_port)"
-  printf '其他落地机数量：%s\n' "$(jq -r '(.extra_exits // []) | length' "$DATA_FILE")"
-  jq -r '.extra_exits[]? | "  \(.name) [\(.id)] 协议：\(.protocol) 目标：\(.host):\(.port) 客户端UUID：\(.client_uuid)"' "$DATA_FILE"
-  printf 'Reality SNI：%s\n' "$(get inbound_sni)"
-  printf '配置文件：%s\nVLESS 文件：%s\nClash 文件：%s\n\n' "$CONFIG_FILE" "$URI_FILE" "$CLASH_FILE"
+  printf '\n========== 多线路信息 ==========\n'
+  printf '狗妈入口名称：%s\n' "$(get entrance_name)"
+  printf '狗妈公网入口：%s:%s\n' "$(get public_host)" "$(get public_port)"
+  printf '内部监听：%s:%s/TCP\n' "$(get listen_address)" "$(get listen_port)"
+  printf '入口 Reality SNI：%s\n' "$(get inbound_sni)"
+  printf '默认出站：%s\n' "$(get default_exit)"
+  printf '\n'
+  list_lines
+  printf '\n配置文件：%s\nVLESS 文件：%s\nClash 文件：%s\n\n' "$CONFIG_FILE" "$URI_FILE" "$CLASH_FILE"
 }
 show_credentials(){
   need_data
-  printf '\n========== 完整认证参数（明文，请勿公开） ==========\n'
-  printf '\n【新加坡 Reality 入站】\n'
-  printf 'SG Direct UUID：%s\n' "$(get direct_uuid)"
-  printf 'SG via JP UUID：%s\n' "$(get inbound_uuid)"
+  printf '\n========== 狗妈入口认证参数 ==========\n'
+  printf '入口名称：%s\n入口公网：%s:%s\n监听：%s:%s\n' \
+    "$(get entrance_name)" "$(get public_host)" "$(get public_port)" "$(get listen_address)" "$(get listen_port)"
   printf 'Reality Private Key：%s\n' "$(get inbound_private_key)"
   printf 'Reality Public Key：%s\n' "$(get inbound_public_key)"
   printf 'Reality Short ID：%s\nReality SNI：%s\n' "$(get inbound_short_id)" "$(get inbound_sni)"
-  printf '\n【日本 BIGLOBE Reality 出站】\n'
-  printf '日本落地 VLESS UUID：%s\n' "$(get jp_uuid)"
-  printf '日本 Reality Public Key：%s\n' "$(get jp_public_key)"
-  printf '日本 Reality Short ID：%s\nReality SNI：%s\n' "$(get jp_short_id)" "$(get jp_sni)"
-  printf '\n【新增落地机（明文）】\n'
-  jq -r '.extra_exits[]? | if .protocol=="reality" then
-    "\(.name) [\(.id)]: 客户端UUID=\(.client_uuid), 公网=\(.host):\(.port), 落地UUID=\(.uuid), Reality Public Key=\(.public_key), Short ID=\(.short_id), SNI=\(.sni)"
-    else "\(.name) [\(.id)]: 客户端UUID=\(.client_uuid), 公网=\(.host):\(.port), SS方式=\(.method), SS密码=\(.password)" end' "$DATA_FILE"
-  printf '\n注意：参数仅在 SSH 终端展示，relay.json 为 root-only（600）。\n\n'
+  printf '\n========== 各线路认证参数 ==========\n'
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    jq -r '
+      if .protocol=="direct" then
+        "【\(.name) [\(.id)]】客户端 UUID：\(.client_uuid)"
+      elif .protocol=="reality" then
+        "【\(.name) [\(.id)]】服务器：\(.host):\(.port)，客户端 UUID：\(.client_uuid)，落地 UUID：\(.uuid)，Public Key：\(.public_key)，Short ID：\(.short_id)，SNI：\(.sni)"
+      else
+        "【\(.name) [\(.id)]】服务器：\(.host):\(.port)，客户端 UUID：\(.client_uuid)，SS Method：\(.method)，SS Password：\(.password)"
+      end
+    ' <<< "$item"
+  done < <(line_array)
+  printf '\n'
 }
 show_links(){
   need_data
-  [[ -n "$(get direct_uuid)" ]] || die "请先选择菜单 9 应用节点配置。"
   write_exports
-  local n=0 uri label index
-  printf '\n========== 全部 VLESS 一键导入链接 ==========\n'
-  while IFS= read -r uri; do
-    ((n+=1))
-    case "$n" in
-      1) label='新加坡直出（SG-Direct）' ;;
-      2) label='日本 BIGLOBE（SG-via-JP）' ;;
-      *)
-        index="$((n-3))"
-        label="$(jq -r --argjson i "$index" '.extra_exits[$i] | "\(.name) [\(.id)]"' "$DATA_FILE")"
-        ;;
-    esac
-    printf '\n【%s】\n%s\n' "$label" "$uri"
-  done < "$URI_FILE"
-  printf '\n共 %s 条独立节点，均通过新加坡同一 Reality 入口。\n' "$n"
-  printf '链接文件：%s\nClash 文件：%s\n\n' "$URI_FILE" "$CLASH_FILE"
+  printf '\n========== 全部线路 VLESS 一键导入链接 ==========\n'
+  cat "$URI_FILE"
+  printf '\n共 %s 条独立线路。\n链接文件：%s\n\n' "$(line_array | jq 'length')" "$URI_FILE"
 }
 show_clash(){
   need_data
-  [[ -n "$(get direct_uuid)" ]] || die "请先选择菜单 9 应用节点配置。"
   write_exports
   printf 'Clash Meta/Mihomo 配置文件：%s\n' "$CLASH_FILE"
-  printf '包含 %s 个 VLESS 节点；下载 YAML 后可在客户端导入。\n' "$(wc -l < "$URI_FILE" | tr -d '[:space:]')"
+  printf '包含 %s 个 VLESS 入口节点；下载 YAML 后可在客户端导入。\n' "$(line_array | jq 'length')"
   printf '注意：文件包含节点认证信息，请勿公开。\n'
 }
 list_extra_exits(){
-  need_data
-  printf '\n========== 新增落地机列表 ==========\n'
-  jq -r '.extra_exits[]? | "ID=\(.id) | 名称=\(.name) | 协议=\(.protocol) | 目标=\(.host):\(.port) | 客户端UUID=\(.client_uuid)"' "$DATA_FILE"
-  [[ "$(jq -r '(.extra_exits // []) | length' "$DATA_FILE")" -gt 0 ]] || warn "目前没有新增落地机，使用菜单 33 添加。"
+  list_lines
 }
-extra_exists(){
+
+extra_exists(){extra_exists(){
   jq -e --arg id "$1" 'any(.extra_exits[]?; .id==$id)' "$DATA_FILE" >/dev/null
 }
 select_extra_id(){
@@ -474,27 +488,23 @@ select_extra_id(){
   extra_exists "$id" || { warn "未找到此 ID。"; return 1; }
   printf '%s' "$id"
 }
+
 prompt_extra_json(){
   local id="$1" old="$2" name protocol host port client_uuid response
   local uuid public_key short_id sni method password
-  name="$(ask_value '落地机名称（例如 美国PAV）' "$(jq -r '.name // empty' <<< "$old")")"
-  valid_exit_name "$name" || { warn "落地机名称不能为空。"; return 1; }
-  protocol="$(jq -r '.protocol // empty' <<< "$old")"
-  if [[ -z "$protocol" ]]; then
-    protocol="$(ask_value '落地协议（reality 或 ss）' 'reality')"
-  else
-    warn "保留原协议 $protocol；切换协议请删除后重新添加。"
-  fi
+  name="$(ask_value '线路名称' "$(jq -r '.name // empty' <<< "$old")")"
+  valid_exit_name "$name" || { warn "线路名称不能为空。"; return 1; }
+  protocol="$(ask_value '线路协议（reality 或 ss）' "$(jq -r '.protocol // "reality"' <<< "$old")")"
   [[ "$protocol" == "reality" || "$protocol" == "ss" ]] || { warn "只支持 reality 和 ss。"; return 1; }
-  host="$(ask_value '落地机公网 IP/域名' "$(jq -r '.host // empty' <<< "$old")")"
-  valid_host "$host" || { warn "落地机地址不合法。"; return 1; }
-  port="$(ask_port '落地机公网 TCP 端口（商家映射端口）' "$(jq -r '.port // 30001' <<< "$old")")"
+  host="$(ask_value '服务器 IP/域名' "$(jq -r '.host // empty' <<< "$old")")"
+  valid_host "$host" || { warn "服务器地址不合法。"; return 1; }
+  port="$(ask_port '服务器端口（商家映射端口）' "$(jq -r '.port // 30001' <<< "$old")")"
   client_uuid="$(jq -r '.client_uuid // empty' <<< "$old")"
   if [[ -n "$client_uuid" ]]; then
     read -r -p '是否重新生成该线路的客户端 UUID？[y/N]： ' response
     if [[ "$response" == "y" || "$response" == "Y" ]]; then
       client_uuid="$("$BIN" generate uuid)"
-      warn "UUID 已重新生成，旧客户端链接会失效。"
+      warn "客户端 UUID 已重新生成，旧客户端链接会失效。"
     fi
   else
     client_uuid="$("$BIN" generate uuid)"
@@ -520,13 +530,14 @@ prompt_extra_json(){
        method:$method,password:$password}'
   fi
 }
-save_extra_change(){
+
+save_extra_change(){save_extra_change(){
   local action="$1" id="$2" entry="$3" tmp
   tmp="$(mktemp "$CONFIG_DIR/relay.json.XXXXXX")"
   case "$action" in
-    add) jq --argjson e "$entry" '.schema_version=3 | .extra_exits=((.extra_exits // []) + [$e])' "$DATA_FILE" > "$tmp" ;;
-    edit) jq --arg id "$id" --argjson e "$entry" '.schema_version=3 | .extra_exits=(.extra_exits | map(if .id==$id then $e else . end))' "$DATA_FILE" > "$tmp" ;;
-    remove) jq --arg id "$id" '.schema_version=3 | .extra_exits=(.extra_exits | map(select(.id!=$id)))' "$DATA_FILE" > "$tmp" ;;
+    add) jq --argjson e "$entry" '.schema_version=4 | .extra_exits=((.extra_exits // []) + [$e])' "$DATA_FILE" > "$tmp" ;;
+    edit) jq --arg id "$id" --argjson e "$entry" '.schema_version=4 | .extra_exits=(.extra_exits | map(if .id==$id then $e else . end))' "$DATA_FILE" > "$tmp" ;;
+    remove) jq --arg id "$id" '.schema_version=4 | .extra_exits=(.extra_exits | map(select(.id!=$id)))' "$DATA_FILE" > "$tmp" ;;
     *) rm -f "$tmp"; return 1 ;;
   esac
   chmod 600 "$tmp"
@@ -571,79 +582,200 @@ remove_extra_exit(){
   show_links
 }
 
-show_ss_japan_snippet(){
-  need_data
-  local pass method
-  pass="$(get jp_ss_password)"
-  method="$(get jp_ss_method)"
-  [[ -n "$pass" ]] || die "尚未生成 SS 密码，请先在协议切换菜单中设置。"
-  [[ -n "$(get jp_ss_listen_address)" ]] || die "尚未设置日本 SS 内网监听地址。"
-  valid_port "$(get jp_ss_listen_port)" || die "日本 SS 内网端口无效。"
-  cat <<EOF
-请在日本 BIGLOBE 的 sing-box 配置 inbounds 数组中追加以下内容：
-日本商家端口映射：公网 TCP $(get jp_ss_port) -> $(get jp_ss_listen_address):$(get jp_ss_listen_port)
 
-{
-  "type": "shadowsocks",
-  "tag": "jp-ss-in",
-  "listen": "$(get jp_ss_listen_address)",
-  "listen_port": $(get jp_ss_listen_port),
-  "network": "tcp",
-  "method": "$method",
-  "password": "$pass"
-}
-EOF
-}
-switch_mode(){
-  local choice port listen_address listen_port method pass
-  echo "1）Reality → Reality（当前基准模式）"
-  echo "2）Reality → Shadowsocks（需先在日本配置 SS 入站）"
-  read -r -p "请选择 [1]: " choice
-  [[ -n "$choice" ]] || choice=1
-  case "$choice" in
+add_line(){
+  need_data
+  echo "1）重新启用狗妈直出线路"
+  echo "2）重新启用日本 BIGLOBE 线路"
+  echo "3）添加其他落地线路（Reality / SS）"
+  read -r -p "请选择： " kind
+  case "$kind" in
     1)
-      begin_change "切换Reality出站"
-      set_string mode "reality"
+      if line_exists direct; then warn "狗妈直出线路已经启用。"; return 0; fi
+      begin_change "启用狗妈直出线路前"
+      set_bool direct_enabled true
+      [[ -n "$(get direct_uuid)" ]] || ensure_direct_uuid
+      [[ -n "$(get default_exit)" ]] || set_string default_exit direct
       finish_change
       ;;
     2)
-      port="$(ask_port '日本 SS 公网映射端口' "$(get jp_ss_port)")"
-      listen_address="$(ask_value '日本 SS 内网监听地址' "$(get jp_ss_listen_address)")"
-      valid_host "$listen_address" || die "日本 SS 内网监听地址无效。"
-      listen_port="$(ask_port '日本 SS 内网监听端口' "$(get jp_ss_listen_port)")"
-      method="$(ask_value 'SS 加密方式' "$(get jp_ss_method)")"
-      case "$method" in
-        2022-blake3-aes-128-gcm)
-          pass="$(get jp_ss_password)"
-          [[ -n "$pass" ]] || pass="$("$BIN" generate rand --base64 16)"
-          ;;
-        aes-128-gcm|chacha20-ietf-poly1305)
-          pass="$(get jp_ss_password)"
-          [[ -n "$pass" ]] || pass="$(openssl rand -base64 24 | tr -d '\n')"
-          ;;
-        *) die "支持的 SS 加密方式：2022-blake3-aes-128-gcm、aes-128-gcm、chacha20-ietf-poly1305。" ;;
-      esac
-      begin_change "切换Shadowsocks出站"
-      set_number jp_ss_port "$port"
-      set_string jp_ss_listen_address "$listen_address"
-      set_number jp_ss_listen_port "$listen_port"
-      set_string jp_ss_method "$method"
-      set_string jp_ss_password "$pass"
-      set_string mode "ss"
+      if line_exists jp; then warn "日本 BIGLOBE 线路已经启用。"; return 0; fi
+      begin_change "启用日本线路前"
+      set_bool jp_enabled true
+      [[ -n "$(get default_exit)" ]] || set_string default_exit jp
       finish_change
-      show_ss_japan_snippet
-      warn "日本端 SS 入站和商家端口映射完成前，不要使用 SS 模式。"
       ;;
-    *) info "已取消。" ;;
+    3)
+      local id entry
+      id="$(ask_value '新线路 ID（英文小写、数字、连字符）' 'global')"
+      valid_exit_id "$id" && [[ "$id" != "direct" && "$id" != "jp" ]] || { warn "线路 ID 不合法或为保留 ID。"; return 0; }
+      if extra_exists "$id"; then warn "该线路 ID 已存在。"; return 0; fi
+      entry="$(prompt_extra_json "$id" '{}')" || { warn "新增线路已取消。"; return 0; }
+      begin_change "添加-$id-线路前"
+      save_extra_change add "$id" "$entry"
+      if [[ -z "$(get default_exit)" ]]; then set_string default_exit "$id"; fi
+      finish_change || return 1
+      ok "线路 $id 已添加。"
+      show_links
+      ;;
+    *) warn "无效选项。" ;;
   esac
 }
-apply_dual_nodes(){
+edit_line(){
+  need_data
+  local id name host port protocol client_uuid uuid public_key short_id sni method password old entry
+  id="$(select_line_id)" || return 0
+  case "$id" in
+    direct)
+      name="$(ask_value '线路名称' "$(get direct_name)")"
+      host="$(ask_value '狗妈公网 IP/域名（客户端连接入口）' "$(get public_host)")"
+      valid_host "$host" || die "服务器地址不合法。"
+      port="$(ask_port '狗妈公网映射端口（客户端连接端口）' "$(get public_port)")"
+      client_uuid="$(ask_value '狗妈直出客户端 UUID' "$(get direct_uuid)")"
+      valid_uuid "$client_uuid" || die "客户端 UUID 格式无效。"
+      begin_change "修改-狗妈直出-前"
+      set_string direct_name "$name"
+      set_string public_host "$host"
+      set_number public_port "$port"
+      set_string direct_uuid "$client_uuid"
+      finish_change
+      ;;
+    jp)
+      name="$(ask_value '线路名称' "$(get jp_name)")"
+      host="$(ask_value '日本 BIGLOBE 服务器 IP/域名' "$(get jp_host)")"
+      valid_host "$host" || die "服务器地址不合法。"
+      protocol="$(ask_value '线路协议（reality 或 ss）' "$(get mode)")"
+      [[ "$protocol" == "reality" || "$protocol" == "ss" ]] || die "协议只支持 reality 或 ss。"
+      if [[ "$protocol" == "ss" ]]; then
+        port="$(ask_port '日本 SS 服务器端口' "$(get jp_ss_port)")"
+      else
+        port="$(ask_port '日本 Reality 服务器端口' "$(get jp_port)")"
+      fi
+      client_uuid="$(ask_value '狗妈入口中的日本线路客户端 UUID' "$(get inbound_uuid)")"
+      valid_uuid "$client_uuid" || die "客户端 UUID 格式无效。"
+      if [[ "$protocol" == "reality" ]]; then
+        uuid="$(ask_value '日本落地 VLESS UUID' "$(get jp_uuid)")"
+        public_key="$(ask_value '日本 Reality Public Key' "$(get jp_public_key)")"
+        short_id="$(ask_value '日本 Reality Short ID' "$(get jp_short_id)")"
+        sni="$(ask_value '日本 Reality SNI' "$(get jp_sni)")"
+        valid_uuid "$uuid" && valid_pubkey "$public_key" && valid_short_or_empty "$short_id" && valid_host "$sni" || die "日本 Reality 参数格式无效。"
+      else
+        method="$(ask_value '日本 SS 加密方式' "$(get jp_ss_method)")"
+        password="$(ask_value '日本 SS 密码' "$(get jp_ss_password)")"
+        valid_ss_method "$method" && [[ -n "$password" ]] || die "日本 SS 加密方式或密码无效。"
+      fi
+      begin_change "修改-日本线路-前"
+      set_string jp_name "$name"
+      set_string jp_host "$host"
+      set_string inbound_uuid "$client_uuid"
+      set_string mode "$protocol"
+      if [[ "$protocol" == "reality" ]]; then
+        set_number jp_port "$port"
+        set_string jp_uuid "$uuid"
+        set_string jp_public_key "$public_key"
+        set_string jp_short_id "$short_id"
+        set_string jp_sni "$sni"
+      else
+        set_number jp_ss_port "$port"
+        set_string jp_ss_method "$method"
+        set_string jp_ss_password "$password"
+      fi
+      finish_change
+      ;;
+    *)
+      old="$(get_line_json "$id")"
+      entry="$(prompt_extra_json "$id" "$old")" || { warn "修改已取消。"; return 0; }
+      begin_change "修改-$id-线路前"
+      save_extra_change edit "$id" "$entry"
+      finish_change
+      ;;
+  esac
+  show_links
+}
+delete_line(){
+  need_data
+  local id count remaining next
+  id="$(select_line_id)" || return 0
+  count="$(line_array | jq 'length')"
+  (( count > 1 )) || die "至少保留一条可用线路，不能删除最后一条。"
+  begin_change "删除-$id-线路前"
+  case "$id" in
+    direct) set_bool direct_enabled false ;;
+    jp) set_bool jp_enabled false ;;
+    *) save_extra_change remove "$id" '{}' ;;
+  esac
+  remaining="$(line_array)"
+  if [[ "$(get default_exit)" == "$id" ]]; then
+    next="$(jq -r '.[0].id' <<< "$remaining")"
+    set_string default_exit "$next"
+  fi
+  finish_change
+  ok "线路 $id 已删除，其余线路保持不变。"
+  show_links
+}
+set_default_line(){
+  need_data
+  local id
+  id="$(select_line_id)" || return 0
+  begin_change "设置默认出站-$id-前"
+  set_string default_exit "$id"
+  finish_change
+  ok "默认出站已设置为 $id。"
+}
+entrance_settings(){
+  need_data
+  local name host public_port listen_address listen_port sni
+  name="$(ask_value '狗妈入口名称' "$(get entrance_name)")"
+  host="$(ask_value '狗妈公网 IP/域名' "$(get public_host)")"
+  valid_host "$host" || die "狗妈公网地址格式无效。"
+  public_port="$(ask_port '狗妈公网映射端口' "$(get public_port)")"
+  listen_address="$(ask_value '狗妈内部监听地址' "$(get listen_address)")"
+  valid_host "$listen_address" || die "监听地址格式无效。"
+  listen_port="$(ask_port '狗妈内部监听端口' "$(get listen_port)")"
+  sni="$(ask_value '狗妈 Reality SNI/握手域名' "$(get inbound_sni)")"
+  valid_host "$sni" || die "SNI 格式无效。"
+  begin_change "修改狗妈入口设置前"
+  set_string entrance_name "$name"
+  set_string public_host "$host"
+  set_number public_port "$public_port"
+  set_string listen_address "$listen_address"
+  set_number listen_port "$listen_port"
+  set_string inbound_sni "$sni"
+  set_string inbound_handshake "$sni"
+  finish_change
+  warn "如果修改了公网映射端口或内部监听端口，请同步更新服务商端口映射。"
+  warn "修改狗妈 Reality SNI 后，客户端及所有外部中转的 SNI 也必须同步修改。"
+}
+line_manager_menu(){
+  need_data
+  while true; do
+    echo
+    echo "========== 统一线路管理 =========="
+    list_lines
+    echo "1）添加线路 / 重新启用内置线路"
+    echo "2）修改线路（名称、服务器 IP、端口、协议及认证参数）"
+    echo "3）删除线路"
+    echo "4）设置默认出站线路"
+    echo "0）返回主菜单"
+    read -r -p "请选择： " action
+    case "$action" in
+      1) add_line ;;
+      2) edit_line ;;
+      3) delete_line ;;
+      4) set_default_line ;;
+      0) return 0 ;;
+      *) warn "无效选项。" ;;
+    esac
+  done
+}
+
+apply_dual_nodes(){apply_dual_nodes(){
   need_data
   [[ -x "$BIN" ]] || die "未找到 sing-box 核心程序。"
   if [[ -n "$(get direct_uuid)" ]]; then
-    info "已存在新加坡直出 UUID，将重新生成双节点配置并保留两个节点 UUID。"
+    info "将重新生成全部线路配置，保留所有现有线路认证参数。"
   else
-    info "将生成新的新加坡直出 UUID；现有日本中转节点 UUID 和 Reality 密钥不会改变。"
+    info "应用全部线路配置；不会自动重新生成现有线路 UUID 或 Reality 密钥。"
   fi
   begin_change "应用双节点配置前"
   ensure_direct_uuid
@@ -651,7 +783,7 @@ apply_dual_nodes(){
   if ! rc-service sing-box restart; then rollback_change; return 1; fi
   rm -f "$CHANGE_OLD_DATA" "$CHANGE_OLD_CONFIG"
   write_exports
-  ok "当前全部节点配置已应用。"
+  ok "当前全部线路配置已应用。"
   printf '节点 A（新加坡直出）UUID：%s\n' "$(get direct_uuid)"
   printf '节点 B（日本 BIGLOBE 出口）UUID：%s\n' "$(get inbound_uuid)"
   printf '新增落地机：%s 台\n' "$(jq -r '(.extra_exits // []) | length' "$DATA_FILE")"
@@ -913,8 +1045,11 @@ setup(){
   [[ ! -s "$DATA_FILE" ]] || die "检测到已有 relay.json，请勿覆盖现有配置。"
   mkdir -p "$CONFIG_DIR" "$EXPORT_DIR" "$BACKUP_ROOT"
   chmod 700 "$CONFIG_DIR" "$EXPORT_DIR" "$BACKUP_ROOT"
-  local public_host public_port listen_address listen_port inbound_sni jp_host jp_port jp_sni
+  local entrance_name direct_name jp_name public_host public_port listen_address listen_port inbound_sni jp_host jp_port jp_sni
   local jp_uuid jp_public jp_short keys private public sid inbound_uuid direct_uuid
+  entrance_name="$(ask_value '狗妈入口名称' '狗妈')"
+  direct_name="$(ask_value '狗妈直出线路名称' '狗妈直出')"
+  jp_name="$(ask_value '日本 BIGLOBE 线路名称' '日本 BIGLOBE')"
   public_host="$(ask_value '新加坡公网 IP/域名' '')"
   public_port="$(ask_port '新加坡公网映射端口' '30010')"
   listen_address="$(ask_value '新加坡监听地址' '0.0.0.0')"
@@ -948,9 +1083,12 @@ setup(){
     --arg inbound_short_id "$sid" --arg inbound_sni "$inbound_sni" \
     --arg inbound_handshake "$inbound_sni" --arg jp_host "$jp_host" \
     --argjson jp_port "$jp_port" --arg jp_uuid "$jp_uuid" \
-    --arg jp_public_key "$jp_public" --arg jp_short_id "$jp_short" --arg jp_sni "$jp_sni" '
+    --arg jp_public_key "$jp_public" --arg jp_short_id "$jp_short" --arg jp_sni "$jp_sni" \
+    --arg entrance_name "$entrance_name" --arg direct_name "$direct_name" --arg jp_name "$jp_name" '
     {
-      schema_version:3,mode:"reality",extra_exits:[],
+      schema_version:4,mode:"reality",extra_exits:[],
+      entrance_name:$entrance_name,direct_name:$direct_name,jp_name:$jp_name,
+      direct_enabled:true,jp_enabled:true,default_exit:"jp",
       public_host:$public_host,public_port:$public_port,
       listen_address:$listen_address,listen_port:$listen_port,
       inbound_uuid:$inbound_uuid,direct_uuid:$direct_uuid,
@@ -1001,51 +1139,37 @@ menu(){
   while true; do
     clear 2>/dev/null || true
     echo "===================================================="
-    echo "       sing-box 新加坡多落地机中转管理面板"
+    echo "          sing-box 狗妈多线路统一管理面板"
     echo "===================================================="
     if [[ -s "$DATA_FILE" ]]; then
-      printf '模式：%s | 新加坡入口：%s:%s\n' "$(get mode)" "$(get public_host)" "$(get public_port)"
-      printf '新加坡直出 + 日本 BIGLOBE + %s 台其他落地机 | 版本：%s\n' "$(jq -r '(.extra_exits // []) | length' "$DATA_FILE")" "$SB_VERSION"
+      printf '入口：%s | %s:%s | 监听：%s:%s\n' \
+        "$(get entrance_name)" "$(get public_host)" "$(get public_port)" "$(get listen_address)" "$(get listen_port)"
+      printf '启用线路：%s | 默认出站：%s | 版本：%s\n' \
+        "$(line_array | jq 'length')" "$(get default_exit)" "$SB_VERSION"
     else
       echo "尚未初始化"
     fi
     cat <<'MENU'
- 1）查看全部节点状态与参数
- 2）明文显示 UUID、Reality 密钥和 Short ID
+ 1）线路总览（名称、协议、服务器 IP、端口）
+ 2）显示全部线路认证参数
  3）显示全部 VLESS 一键导入链接
- 4）导出 Clash Meta / Mihomo 配置文件（本地 YAML，手动导入）
+ 4）导出 Clash Meta / Mihomo 配置文件
  5）启用 Clash 远程订阅服务（HTTPS，需配置反向代理）
  6）查看当前 Clash 订阅链接
  7）重新生成订阅访问令牌
  8）关闭 Clash 订阅服务
- 9）应用/修复全部节点路由配置（保留现有日本节点）
-10）重新生成节点 A（新加坡直出）UUID
-11）修改节点 B（日本出口）客户端 UUID
-12）修改新加坡公网 IP/域名
-13）修改新加坡公网映射端口
-14）修改新加坡内部监听端口
-15）修改日本 BIGLOBE IP/域名
-16）修改日本 Reality 公网端口
-17）修改新加坡 Reality SNI
-18）修改日本 Reality SNI
-19）修改日本落地 VLESS UUID
-20）修改日本落地 Reality Public Key
-21）修改日本落地 Reality Short ID
-22）重新生成新加坡 Reality 密钥和 Short ID
-23）切换日本出站：Reality / Shadowsocks
-24）检查 sing-box 配置
-25）启动 / 停止 / 重启 sing-box
-26）查看服务状态、监听端口
-27）查看最近日志
-28）备份当前配置
-29）恢复历史备份
-30）更新 sb 管理脚本（从 GitHub 拉取最新版）
-31）更新 sing-box 核心
-32）卸载 sing-box
-33）添加美国 / 其他落地机（Reality / Shadowsocks）
-34）查看其他落地机列表
-35）修改已添加的落地机（可重置客户端 UUID）
-36）删除已添加的落地机
+ 9）应用/修复全部线路配置
+10）统一线路管理（添加、修改、删除、设置默认出站）
+11）狗妈入口设置（名称、IP、映射端口、监听端口、SNI）
+12）检查 sing-box 配置
+13）启动 / 停止 / 重启 sing-box
+14）查看服务状态、监听端口
+15）查看最近日志
+16）备份当前配置
+17）恢复历史备份
+18）更新 sb 管理脚本（从 GitHub 拉取最新版）
+19）更新 sing-box 核心
+20）卸载 sing-box
  0）退出
 MENU
     echo
@@ -1060,22 +1184,10 @@ MENU
       7) subscription_rotate ;;
       8) subscription_disable ;;
       9) apply_dual_nodes ;;
-      10) rotate_direct_uuid ;;
-      11) change_string inbound_uuid "节点 B（日本出口）客户端 UUID" uuid ;;
-      12) change_string public_host "新加坡公网 IP/域名" host ;;
-      13) change_number public_port "新加坡公网映射端口" ;;
-      14) change_number listen_port "新加坡内部监听端口" ;;
-      15) change_string jp_host "日本 BIGLOBE IP/域名" host ;;
-      16) change_number jp_port "日本 BIGLOBE Reality 公网端口" ;;
-      17) change_sni ;;
-      18) change_string jp_sni "日本 Reality SNI" host ;;
-      19) change_string jp_uuid "日本落地 VLESS UUID" uuid ;;
-      20) change_string jp_public_key "日本落地 Reality Public Key" pubkey ;;
-      21) change_string jp_short_id "日本落地 Reality Short ID" short ;;
-      22) rotate_reality ;;
-      23) switch_mode ;;
-      24) config_check ;;
-      25)
+      10) line_manager_menu ;;
+      11) entrance_settings ;;
+      12) config_check ;;
+      13)
         echo "1）启动  2）停止  3）重启"
         read -r -p "请选择： " action
         case "$action" in
@@ -1085,23 +1197,19 @@ MENU
           *) warn "无效选项。" ;;
         esac
         ;;
-      26) service_status ;;
-      27)
+      14) service_status ;;
+      15)
         echo "========== sing-box 错误日志 =========="
         tail -n 80 /var/log/sing-box.err 2>/dev/null || true
         echo
         echo "========== sing-box 运行日志 =========="
         tail -n 80 /var/log/sing-box.log 2>/dev/null || true
         ;;
-      28) backup_menu ;;
-      29) restore_menu ;;
-      30) update_manager ;;
-      31) update_core ;;
-      33) add_extra_exit ;;
-      34) list_extra_exits ;;
-      35) edit_extra_exit ;;
-      36) remove_extra_exit ;;
-      32)
+      16) backup_menu ;;
+      17) restore_menu ;;
+      18) update_manager ;;
+      19) update_core ;;
+      20)
         echo "1）卸载程序和服务，保留配置"
         echo "2）完全卸载程序、服务和配置（历史备份保留）"
         echo "0）取消"
@@ -1133,10 +1241,12 @@ MENU
   done
 }
 
+if [[ "$(printenv SB_LIB_ONLY
 if [[ "$(printenv SB_LIB_ONLY 2>/dev/null || true)" == "1" ]]; then
   return 0 2>/dev/null || exit 0
 fi
 need_root
+migrate_legacy_data
 cmd="menu"
 [[ $# -eq 0 ]] || cmd="$1"
 case "$cmd" in
