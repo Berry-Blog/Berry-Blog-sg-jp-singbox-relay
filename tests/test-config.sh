@@ -148,10 +148,10 @@ jq -e '
 write_exports
 test "$(wc -l < "$URI_FILE" | tr -d '[:space:]')" = "4"
 test "$(grep -c '^vless://' "$URI_FILE")" = "4"
-grep -Fq '#SG-Direct' "$URI_FILE"
-grep -Fq '#SG-via-JP' "$URI_FILE"
-grep -Fq '#SG-via-us-pav' "$URI_FILE"
-grep -Fq '#SG-via-us-ss' "$URI_FILE"
+grep -Fq '#%E7%8B%97%E5%A6%88%E7%9B%B4%E5%87%BA' "$URI_FILE"
+grep -Fq '#%E6%97%A5%E6%9C%AC%20BIGLOBE' "$URI_FILE"
+grep -Fq '#SG-via-us-pav-%E7%BE%8E%E5%9B%BD%20PAV' "$URI_FILE"
+grep -Fq '#SG-via-us-ss-%E7%BE%8E%E5%9B%BD%20SS%20%E5%A4%87%E7%94%A8' "$URI_FILE"
 
 # 测试生成 YAML 能被 Python YAML 解析器解析，且四个代理均在策略组中。
 /usr/bin/python3 - "$CLASH_FILE" <<'PY'
@@ -176,7 +176,7 @@ render_config > "$CONFIG_FILE"
 "$BIN" check -c "$CONFIG_FILE"
 write_exports
 test "$(wc -l < "$URI_FILE" | tr -d '[:space:]')" = "3"
-! grep -Fq '#SG-via-us-pav' "$URI_FILE"
+! grep -Fq '#SG-via-us-pav-' "$URI_FILE"
 
 entry="$(jq -c '.extra_exits[0] | .name="修改后的备用出口"' "$DATA_FILE")"
 save_extra_change edit "us-ss" "$entry"
@@ -213,6 +213,6 @@ printf '%s\n' 'us-pav2' 'YES' |
   remove_extra_exit > "$TMP/menu-remove.out"
 test "$(jq -r '(.extra_exits // []) | length' "$DATA_FILE")" = "2"
 test "$(wc -l < "$URI_FILE" | tr -d '[:space:]')" = "4"
-! grep -Fq '#SG-via-us-pav2' "$URI_FILE"
+! grep -Fq '#SG-via-us-pav2-' "$URI_FILE"
 test "$(jq -c '[.inbound_uuid,.jp_uuid,.jp_public_key,.jp_short_id,.jp_host,.jp_port]' "$DATA_FILE")" = "$snapshot_jp"
 echo "菜单 33/35/36 实际交互增删改测试通过。"
