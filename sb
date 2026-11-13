@@ -827,38 +827,6 @@ rotate_reality(){
   show_credentials
   show_links
 }
-change_string(){
-  local key="$1" label="$2" validator="$3" current value
-  current="$(get "$key")"
-  value="$(ask_value "$label" "$current")"
-  case "$validator" in
-    host) valid_host "$value" || die "地址格式无效。" ;;
-    uuid) valid_uuid "$value" || die "UUID 格式无效。" ;;
-    short) valid_short "$value" || die "Short ID 必须是 2 至 16 位偶数长度十六进制字符。" ;;
-    pubkey) valid_pubkey "$value" || die "Reality Public Key 格式无效。" ;;
-    nonempty) [[ -n "$value" ]] || die "内容不能为空。" ;;
-  esac
-  begin_change "修改-$key-前"
-  set_string "$key" "$value"
-  finish_change
-  case "$key" in
-    inbound_uuid) warn "节点 B 客户端 UUID 已修改，请重新导入节点 B 的 VLESS 链接。" ;;
-    jp_uuid|jp_public_key|jp_short_id) warn "日本落地认证参数已修改，必须与日本 BIGLOBE 的 Reality 入站配置保持一致。" ;;
-  esac
-}
-change_number(){
-  local key="$1" label="$2" current value
-  current="$(get "$key")"
-  value="$(ask_port "$label" "$current")"
-  begin_change "修改-$key-前"
-  set_number "$key" "$value"
-  finish_change
-  case "$key" in
-    public_port) warn "请同步修改商家公网映射的外部端口。" ;;
-    listen_port) warn "请同步修改商家映射的内部目标端口。" ;;
-    jp_port) warn "请确认日本 BIGLOBE 公网端口映射同步更新。" ;;
-  esac
-}
 config_check(){
   "$BIN" check -c "$CONFIG_FILE"
   ok "sing-box 配置校验通过。"
