@@ -110,7 +110,7 @@ list_lines(){
   while IFS= read -r item; do
     [[ -n "$item" ]] || continue
     jq -r '"ID=\(.id) | 名称=\(.name) | 类型=\(.protocol) | 服务器=\(.host):\(.port) | 客户端UUID=\(.client_uuid)"' <<< "$item"
-  done < <(line_array)
+  done < <(line_array | jq -c '.[]')
   printf '默认出站：%s\n' "$(get default_exit)"
 }
 select_line_id(){
@@ -337,7 +337,7 @@ write_vless_links(){
     label="$(jq -nr --arg s "$label" '$s|@uri')"
     printf 'vless://%s@%s:%s?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp&headerType=none#%s\n' \
       "$uuid" "$host" "$(get public_port)" "$(get inbound_sni)" "$(get inbound_public_key)" "$(get inbound_short_id)" "$label" >> "$URI_FILE"
-  done < <(line_array)
+  done < <(line_array | jq -c '.[]')
   chmod 600 "$URI_FILE"
 }
 write_clash_yaml(){
@@ -379,7 +379,7 @@ EOF
       public-key: "$(get inbound_public_key)"
       short-id: "$(get inbound_short_id)"
 EOF
-    done < <(line_array)
+    done < <(line_array | jq -c '.[]')
     cat <<'EOF'
 
 proxy-groups:
@@ -394,7 +394,7 @@ EOF
       label="$name"
       if [[ "$id" != "direct" && "$id" != "jp" ]]; then label="$name [$id]"; fi
       printf '      - %s\n' "$(yaml_quote "$label")"
-    done < <(line_array)
+    done < <(line_array | jq -c '.[]')
     cat <<'EOF'
       - DIRECT
 
@@ -454,7 +454,7 @@ show_credentials(){
         "【\(.name) [\(.id)]】服务器：\(.host):\(.port)，客户端 UUID：\(.client_uuid)，SS Method：\(.method)，SS Password：\(.password)"
       end
     ' <<< "$item"
-  done < <(line_array)
+  done < <(line_array | jq -c '.[]')
   printf '\n'
 }
 show_links(){
