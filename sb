@@ -69,6 +69,7 @@ migrate_legacy_data(){
 line_array(){
   need_data
   jq -c '
+    . as $state |
     [
       (if (.direct_enabled // true) then {
         id:"direct",name:(.direct_name // "狗妈直出"),protocol:"direct",
@@ -85,8 +86,8 @@ line_array(){
       client_uuid:.client_uuid,uuid:(.uuid // ""),public_key:(.public_key // ""),
       short_id:(.short_id // ""),sni:(.sni // ""),
       method:(.method // ""),password:(.password // "")
-    })) + ((.global_exits // []) | map(. as $exit
-      | (.global_profiles[]? | select(.profile_id==$exit.profile_id)) as $profile
+    })) + (($state.global_exits // []) | map(. as $exit
+      | ($state.global_profiles[]? | select(.profile_id==$exit.profile_id)) as $profile
       | select($profile != null and ($exit.enabled // true)==true)
       | {
           id:$exit.id,name:($exit.name // $exit.id),protocol:"reality",
@@ -970,12 +971,9 @@ global_route_valid(){
     ([ $config[0].outbounds[]? | select(.tag==$outbound and .type=="vless" and .server==$profile.server and .server_port==$profile.public_port and .uuid==$exit.global_uuid) ]) as $outbounds |
     ([ $config[0].route.rules[]? | select(.auth_user==[$user] and .outbound==$outbound) ]) as $routes |
     {valid: (($exit != null) and ($profile != null) and ($users|length)==1 and ($outbounds|length)==1 and ($routes|length)==1),
-     exit: ($exit.id // null), client_uuid: ($exit.client_uuid // null), global_uuid: ($exit.global_uuid // null),
+     exit: ($exit.id // null),
      profile: ($profile.profile_id // null), user_matches: ($users|length), outbound_matches: ($outbounds|length), route_matches: ($routes|length),
-     config_keys: (($config[0] // {})|keys),
-     observed_users: ([$config[0].inbounds[]?.users[]? | {name,uuid}]),
-     observed_outbounds: ([$config[0].outbounds[]? | {tag,type,server,server_port,uuid}]),
-     observed_routes: ([$config[0].route.rules[]? | {auth_user,outbound}])}
+     config_keys: (($config[0] // {})|keys)}
   ' 2>&1)" || { warn "Global线路 $id 一致性诊断失败：$check"; return 1; }
   if [[ "$(jq -r '.valid' <<< "$check" 2>/dev/null)" == true ]]; then return 0; fi
   warn "Global线路 $id 一致性检查失败：$check"

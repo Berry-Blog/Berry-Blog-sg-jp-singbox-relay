@@ -67,25 +67,6 @@ jobs:
 
       - name: Validate Global imports, routes, UUID separation, links and status
         run: |
-          diag="$RUNNER_TEMP/global-relay-tests.log"
-          : > "$diag"
-          set +e
-          python3 -m unittest tests/test_global_relay.py >"$diag" 2>&1
-          python_status=$?
-          if [ "$python_status" -eq 0 ]; then
-            bash tests/test-global-relay.sh >>"$diag" 2>&1
-            shell_status=$?
-          else
-            shell_status=0
-          fi
-          cat "$diag"
-          printf 'python_status=%s shell_status=%s\n' "$python_status" "$shell_status"
-          test "$python_status" -eq 0 && test "$shell_status" -eq 0
+          python3 -m unittest tests/test_global_relay.py
+          bash tests/test-global-relay.sh
 
-      - name: Upload Global relay test diagnostics
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: global-relay-test-diagnostics
-          path: ${{ runner.temp }}/global-relay-tests.log
-          if-no-files-found: ignore
