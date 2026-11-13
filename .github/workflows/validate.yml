@@ -18,18 +18,23 @@ jobs:
           bash -n sb
           bash -n tests/test-config.sh
 
-      - name: Check VLESS export and Alpine subscription wiring
+      - name: Check unified line manager wiring
         run: |
-          grep -Fq 'while IFS= read -r uri; do' sb
-          grep -Fq 'extra_exits' sb
-          grep -Fq 'sg-via-' sb
-          grep -Fq '33）添加美国' sb
-          grep -Fq '36）删除已添加的落地机' sb
-          grep -Fq 'find_httpd_binary' sb
-          grep -Fq 'command="$HTTPD_BIN"' sb
-          grep -Fq 'busybox-extras' sb
-          grep -Fq '本地 YAML，手动导入' sb
-          grep -Fq 'HTTPS，需配置反向代理' sb
+          grep -Fq 'line_manager_menu(){' sb
+          grep -Fq 'add_line(){' sb
+          grep -Fq 'edit_line(){' sb
+          grep -Fq 'delete_line(){' sb
+          grep -Fq 'set_default_line(){' sb
+          grep -Fq 'entrance_settings(){' sb
+          grep -Fq 'migrate_legacy_data(){' sb
+          grep -Fq 'schema_version:4' sb
+          grep -Fq 'REPO_RAW=' sb
+          grep -Fq 'write_vless_links(){' sb
+          grep -Fq 'write_clash_yaml(){' sb
+          grep -Fq 'sync_subscription_file(){' sb
+          ! grep -Fq '33）添加美国 / 其他落地机' sb
+          ! grep -Fq 'change_string(){' sb
+          ! grep -Fq 'change_number(){' sb
 
       - name: Install jq
         run: |
@@ -49,6 +54,6 @@ jobs:
           sudo install -m 0755 "$BIN" /usr/local/bin/sing-box
           sing-box version
 
-      - name: Validate original JP and multi-exit Reality/SS routing, exports and YAML
+      - name: Validate legacy migration, unified routes and exports
         run: |
           bash tests/test-config.sh
