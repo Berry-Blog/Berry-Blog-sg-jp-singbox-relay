@@ -224,7 +224,7 @@ render_config(){
   [[ "$lines" != "[]" ]] || die "至少需要保留一条启用线路。"
   default_exit="$(get default_exit)"
   if ! jq -e --arg id "$default_exit" 'any(.[]; .id==$id)' <<< "$lines" >/dev/null; then
-    default_exit="$(jq -r '.[0].id' <<< "$lines")"
+    default_exit="$(jq -r 'if any(.[]; .id=="jp") then "jp" else .[0].id end' <<< "$lines")"
     set_string default_exit "$default_exit"
   fi
   jq -n \
