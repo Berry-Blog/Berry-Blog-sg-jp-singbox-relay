@@ -68,5 +68,5 @@ jobs:
       - name: Validate Global imports, routes, UUID separation, links and status
         run: |
           python3 -m unittest tests/test_global_relay.py
-          bash -x tests/test-global-relay.sh
+          bash tests/test-global-relay.sh
 
