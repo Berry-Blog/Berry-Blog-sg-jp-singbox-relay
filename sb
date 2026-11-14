@@ -3,7 +3,7 @@ set -Eeuo pipefail
 export LANG=C.UTF-8
 
 REPO_RAW="https://raw.githubusercontent.com/Berry-Blog/Berry-Blog-sg-jp-singbox-relay/main"
-SB_VERSION="2026-11-14-global-home-1"
+SB_VERSION="2026-11-15-global-home-2"
 CONFIG_DIR="/etc/sing-box"
 DATA_FILE="$CONFIG_DIR/relay.json"
 CONFIG_FILE="$CONFIG_DIR/config.json"
@@ -128,17 +128,22 @@ get_line_json(){
 list_lines(){
   need_data
   printf '\n========== 全部线路 ==========\n'
-  while IFS= read -r item; do
-    [[ -n "$item" ]] || continue
-    jq -r '"ID=\(.id) | 名称=\(.name) | 类型=\(.protocol) | 服务器=\(.host):\(.port) | 客户端UUID=\(.client_uuid)"' <<< "$item"
-  done < <(line_array | jq -c '.[]')
+  line_array | jq -r 'to_entries[] | "\(.key+1)) \(.value.name) | ID=\(.value.id) | 类型=\(.value.protocol) | 服务器=\(.value.host):\(.value.port) | 客户端UUID=\(.value.client_uuid)"'
   printf '默认出站：%s\n' "$(get default_exit)"
 }
 select_line_id(){
-  local id
+  local selection index id lines
+  lines="$(line_array)" || return 1
   list_lines >&2
-  id="$(ask_value '请输入线路 ID（direct / jp / 其他线路ID）' '')"
-  [[ "$id" == "direct" || "$id" == "jp" ]] || valid_exit_id "$id" || { warn "线路 ID 格式错误。"; return 1; }
+  selection="$(ask_value '请输入线路序号（也可输入线路ID）' '')"
+  if [[ "$selection" =~ ^[0-9]{1,3}$ ]]; then
+    index=$((10#$selection))
+    id="$(jq -r --argjson index "$index" '.[$index-1].id // empty' <<< "$lines")"
+    [[ -n "$id" ]] || { warn "线路序号超出范围。"; return 1; }
+  else
+    id="$selection"
+  fi
+  [[ "$id" == "direct" || "$id" == "jp" ]] || valid_exit_id "$id" || { warn "线路序号或 ID 无效。"; return 1; }
   line_exists "$id" || { warn "没有找到启用中的这条线路。"; return 1; }
   printf '%s' "$id"
 }
@@ -481,8 +486,20 @@ show_credentials(){
 show_links(){
   need_data
   write_exports
+  local item index=0 name uuid link
   printf '\n========== 全部线路 VLESS 一键导入链接 ==========\n'
-  cat "$URI_FILE"
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    index=$((index+1))
+    name="$(jq -r '.name' <<< "$item")"
+    uuid="$(jq -r '.client_uuid' <<< "$item")"
+    link="$(grep -F "$uuid@" "$URI_FILE" || true)"
+    if [[ -n "$link" ]]; then
+      printf '%2d) %s\n    %s\n' "$index" "$name" "$link"
+    else
+      warn "线路 $name 未找到对应的 VLESS 链接。"
+    fi
+  done < <(line_array | jq -c '.[]')
   printf '\n共 %s 条独立线路。\n链接文件：%s\n\n' "$(line_array | jq 'length')" "$URI_FILE"
 }
 show_clash(){
@@ -779,7 +796,23 @@ global_profile_list(){
   jq -r '.global_profiles[]? | "\(.profile_id) | \(.name) | \(.server):\(.public_port) | SNI=\(.sni)"' "$DATA_FILE"
 }
 global_exit_list(){
-  line_array | jq -r '.[] | select(.global==true) | "\(.id) | \(.name) | Global=\(.host):\(.port) | Global UUID=\(.uuid) | 狗妈客户端 UUID=\(.client_uuid)"'
+  line_array | jq -r '[.[] | select(.global==true)] | to_entries[] | "\(.key+1)) \(.value.name) | ID=\(.value.id) | Global=\(.value.host):\(.value.port) | Global UUID=\(.value.uuid) | 狗妈客户端 UUID=\(.value.client_uuid)"'
+}
+global_select_exit_id(){
+  local action="$1" selection index id entries
+  entries="$(line_array | jq -c '[.[] | select(.global==true)]')" || return 1
+  [[ "$entries" != '[]' ]] || { info '当前没有 Global 家宽线路。'; return 1; }
+  global_exit_list >&2
+  selection="$(ask_value "请输入要$action的线路序号（也可输入线路ID）" '')"
+  if [[ "$selection" =~ ^[0-9]{1,3}$ ]]; then
+    index=$((10#$selection))
+    id="$(jq -r --argjson index "$index" '.[$index-1].id // empty' <<< "$entries")"
+    [[ -n "$id" ]] || { warn 'Global 线路序号超出范围。'; return 1; }
+  else
+    id="$selection"
+  fi
+  jq -e --arg id "$id" 'any(.[]; .id==$id)' <<< "$entries" >/dev/null || { warn '未找到该 Global 线路序号或 ID。'; return 1; }
+  printf '%s' "$id"
 }
 global_select_profile(){
   local id
@@ -789,7 +822,9 @@ global_select_profile(){
   printf '%s' "$id"
 }
 global_import_json(){
-  local path mode plan added updated duplicate anomalies conflict confirm allow temp
+  local path mode plan added updated duplicate anomalies conflict confirm allow
+  local selected_file selected_ids_file selected_numbers raw_index index number id selected_id invalid_selection duplicate_index choice
+  local -a candidates=() indices=() selected_ids=()
   path="$(ask_value 'Global JSON 文件路径' '/root/global-relay.json')"
   [[ -f "$path" ]] || { warn "文件不存在：$path"; return 1; }
   local file_mode
@@ -801,25 +836,69 @@ global_import_json(){
   read -r -p '请选择导入模式 [1/2/3，默认3]：' choice
   case "$choice" in 1) mode=add;; 2) mode=update;; *) mode=incremental;; esac
   plan="$(mktemp "$CONFIG_DIR/global-relay-plan.XXXXXX")"
-  local selected_ids selected_file
   selected_file="$(mktemp "$CONFIG_DIR/global-relay-selected.XXXXXX")"
-  if ! global_relay plan "$path" "$DATA_FILE" "$mode" > "$plan"; then rm -f "$plan" "$selected_file"; return 1; fi
+  selected_ids_file="$(mktemp "$CONFIG_DIR/global-relay-selection.XXXXXX")"
+  if ! global_relay plan "$path" "$DATA_FILE" "$mode" > "$plan"; then rm -f "$plan" "$selected_file" "$selected_ids_file"; return 1; fi
+  mapfile -t candidates < <(jq -c '._additions[]?, ._updates[]?' "$plan")
+  if (("${#candidates[@]}" == 0)); then
+    rm -f "$plan" "$selected_file" "$selected_ids_file"
+    info '没有可导入的正常线路。'
+    return 0
+  fi
   echo
   echo '可导入候选线路（异常和重复线路不会列入可选项）：'
-  jq -r '._additions[]?, ._updates[]? | "\(.id) | \(.name)"' "$plan"
-  read -r -p '请输入要导入的线路ID，多个用逗号分隔（输入 ALL 选择全部候选）：' selected_ids
-  if [[ "$selected_ids" == "ALL" || "$selected_ids" == "all" ]]; then
-    cp "$path" "$selected_file"
-  else
-    jq --arg ids "$selected_ids" --slurpfile plan "$plan" '
-      ($ids | split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length>0))) as $wanted
+  for index in "${!candidates[@]}"; do
+    printf '%2d) %s | %s\n' "$((index+1))" "$(jq -r '.name' <<< "${candidates[$index]}")" "$(jq -r '.id' <<< "${candidates[$index]}")"
+  done
+  while true; do
+    read -r -p '请输入线路序号，多个用逗号分隔（输入 ALL 选择全部候选）：' selected_numbers
+    if [[ "$selected_numbers" == "ALL" || "$selected_numbers" == "all" ]]; then
+      cp "$path" "$selected_file"
+      break
+    fi
+    if [[ ! "$selected_numbers" =~ ^[[:space:]]*[0-9]+([[:space:]]*,[[:space:]]*[0-9]+)*[[:space:]]*$ ]]; then
+      warn '请输入候选列表中的序号，用逗号分隔；全部导入请输入 ALL。'
+      continue
+    fi
+    IFS=',' read -r -a indices <<< "$selected_numbers"
+    selected_ids=()
+    invalid_selection=0
+    for raw_index in "${indices[@]}"; do
+      index="${raw_index//[[:space:]]/}"
+      if [[ ! "$index" =~ ^[0-9]{1,3}$ ]]; then
+        warn "无效序号：$raw_index"
+        invalid_selection=1
+        break
+      fi
+      number=$((10#$index))
+      if (( number < 1 || number > ${#candidates[@]} )); then
+        warn "序号 $number 超出范围（1-${#candidates[@]}）。"
+        invalid_selection=1
+        break
+      fi
+      id="$(jq -r '.id' <<< "${candidates[$((number-1))]}")"
+      duplicate_index=0
+      for selected_id in "${selected_ids[@]}"; do
+        if [[ "$selected_id" == "$id" ]]; then duplicate_index=1; break; fi
+      done
+      if (( duplicate_index == 0 )); then selected_ids+=("$id"); fi
+    done
+    (( invalid_selection == 0 )) || continue
+    if (("${#selected_ids[@]}" == 0)); then
+      warn '没有选择线路，请输入序号或 ALL。'
+      continue
+    fi
+    printf '%s\n' "${selected_ids[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))' > "$selected_ids_file"
+    jq --slurpfile ids "$selected_ids_file" '
+      ($ids[0]) as $wanted
       | .exits = [ .exits[] | select(.id as $id | $wanted | index($id)) ]
     ' "$path" > "$selected_file"
-  fi
+    break
+  done
   if [[ ! -s "$selected_file" ]] || [[ "$(jq '.exits|length' "$selected_file")" -eq 0 ]]; then
-    rm -f "$plan" "$selected_file"; warn '没有选择有效线路，已取消。'; return 1
+    rm -f "$plan" "$selected_file" "$selected_ids_file"; warn '没有选择有效线路，已取消。'; return 1
   fi
-  if ! global_relay plan "$selected_file" "$DATA_FILE" "$mode" > "$plan"; then rm -f "$plan" "$selected_file"; return 1; fi
+  if ! global_relay plan "$selected_file" "$DATA_FILE" "$mode" > "$plan"; then rm -f "$plan" "$selected_file" "$selected_ids_file"; return 1; fi
   added="$(jq '.add|length' "$plan")"; updated="$(jq '.update|length' "$plan")"
   duplicate="$(jq '.duplicates|length' "$plan")"; anomalies="$(jq '.anomalies|length' "$plan")"
   conflict="$(jq -r '.profile_conflict' "$plan")"
@@ -833,17 +912,17 @@ global_import_json(){
   if [[ "$conflict" == true ]]; then
     warn '该 profile 的公共参数与本地不一致。确认后会统一更新其关联线路的 Global 服务器和 Reality 参数。'
     read -r -p '是否明确更新公共参数？[y/N]：' confirm
-    [[ "$confirm" == y || "$confirm" == Y ]] || { rm -f "$plan"; info '已取消导入。'; return 0; }
+    [[ "$confirm" == y || "$confirm" == Y ]] || { rm -f "$plan" "$selected_file" "$selected_ids_file"; info '已取消导入。'; return 0; }
     allow='--allow-profile-update'
   fi
   read -r -p '确认执行安全增量导入？[y/N]：' confirm
-  [[ "$confirm" == y || "$confirm" == Y ]] || { rm -f "$plan"; info '已取消导入。'; return 0; }
+  [[ "$confirm" == y || "$confirm" == Y ]] || { rm -f "$plan" "$selected_file" "$selected_ids_file"; info '已取消导入。'; return 0; }
   if (( added == 0 && updated == 0 )) && [[ "$conflict" != true ]]; then
-    rm -f "$plan"; info '没有可新增或更新的正常线路。'; return 0
+    rm -f "$plan" "$selected_file" "$selected_ids_file"; info '没有可新增或更新的正常线路。'; return 0
   fi
   begin_change '导入Global线路前'
-  if ! global_relay apply "$selected_file" "$DATA_FILE" "$mode" $allow; then rm -f "$plan" "$selected_file"; rollback_change; return 1; fi
-  rm -f "$plan" "$selected_file"
+  if ! global_relay apply "$selected_file" "$DATA_FILE" "$mode" $allow; then rm -f "$plan" "$selected_file" "$selected_ids_file"; rollback_change; return 1; fi
+  rm -f "$plan" "$selected_file" "$selected_ids_file"
   finish_change || return 1
   ok "导入处理完成：新增 $added 条、更新 $updated 条；异常 $anomalies 条未作为正常线路导入。"
   show_links
@@ -928,10 +1007,9 @@ global_edit_exit(){
 }
 global_remove_exit(){
   local id name confirm
-  global_exit_list
-  id="$(ask_value '请输入要删除的Global线路ID' '')"
+  id="$(global_select_exit_id '删除')" || return 0
   name="$(jq -r --arg id "$id" '.global_exits[]? | select(.id==$id) | .name' "$DATA_FILE")"
-  [[ -n "$name" ]] || { warn '未找到Global线路。'; return 1; }
+  [[ -n "$name" ]] || { warn '未找到Global线路。'; return 0; }
   read -r -p "确认删除 $name [$id] 及其狗妈用户、出站和路由？[y/N]：" confirm
   [[ "$confirm" == y || "$confirm" == Y ]] || { info '已取消。'; return 0; }
   begin_change "删除Global-$id-前"
@@ -966,17 +1044,24 @@ global_edit_profile(){
   ok 'Profile已更新，关联线路已统一使用新公共参数。'
 }
 global_list_lines(){
-  echo '========== 全部 Global 家宽线路 =========='
+  echo '========== 全部 Global 家宽线路（序号用于修改/删除） =========='
   global_exit_list
 }
 global_show_links(){
   write_exports
-  local item uuid
+  local item uuid name link index=0
   echo '========== Global线路狗妈客户端 VLESS 链接 =========='
   while IFS= read -r item; do
     [[ -n "$item" ]] || continue
+    index=$((index+1))
     uuid="$(jq -r '.client_uuid' <<< "$item")"
-    grep -F "$uuid@" "$URI_FILE" || true
+    name="$(jq -r '.name' <<< "$item")"
+    link="$(grep -F "$uuid@" "$URI_FILE" || true)"
+    if [[ -n "$link" ]]; then
+      printf '%2d) %s\n    %s\n' "$index" "$name" "$link"
+    else
+      warn "Global线路 $name 未找到对应的 VLESS 链接。"
+    fi
   done < <(line_array | jq -c '.[] | select(.global==true)')
 }
 global_route_valid(){
@@ -1052,7 +1137,7 @@ global_menu(){
     case "$action" in
       1) global_import_json ;;
       2) global_manual_add ;;
-      3) local id; global_exit_list; id="$(ask_value '请输入Global线路ID' '')"; global_edit_exit "$id" ;;
+      3) local id; if id="$(global_select_exit_id '修改')"; then global_edit_exit "$id"; fi ;;
       4) global_remove_exit ;;
       5) global_list_lines ;;
       6) global_show_links ;;
