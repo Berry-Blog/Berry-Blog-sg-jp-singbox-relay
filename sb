@@ -951,8 +951,12 @@ global_manual_add(){
       elif [[ "$method" == 2 ]]; then
         profile_id="$(ask_value 'Global profile ID' 'global-home-main')"
         profile_name="$(ask_value 'Global profile 名称' 'Global Home')"
-        server="$(ask_value 'Global公网IP/域名' '209.33.166.81')"
-        port="$(ask_port 'Global公网映射端口（不要填写容器内部80）' '40045')"
+        server=''
+        while [[ -z "$server" ]]; do
+          server="$(ask_value 'Global公网IP/域名' '')"
+          [[ -n "$server" ]] || warn '公网IP/域名不能为空。'
+        done
+        port="$(ask_port 'Global公网映射端口（不要填写容器内部端口）' '')"
         network="$(ask_value 'Network（当前支持tcp）' 'tcp')"
         security="$(ask_value 'Security（当前支持reality）' 'reality')"
         sni="$(ask_value 'Global Reality SNI' 'www.apple.com')"
