@@ -801,7 +801,25 @@ global_import_json(){
   read -r -p '请选择导入模式 [1/2/3，默认3]：' choice
   case "$choice" in 1) mode=add;; 2) mode=update;; *) mode=incremental;; esac
   plan="$(mktemp "$CONFIG_DIR/global-relay-plan.XXXXXX")"
-  if ! global_relay plan "$path" "$DATA_FILE" "$mode" > "$plan"; then rm -f "$plan"; return 1; fi
+  local selected_ids selected_file
+  selected_file="$(mktemp "$CONFIG_DIR/global-relay-selected.XXXXXX")"
+  if ! global_relay plan "$path" "$DATA_FILE" "$mode" > "$plan"; then rm -f "$plan" "$selected_file"; return 1; fi
+  echo
+  echo '可导入候选线路（异常和重复线路不会列入可选项）：'
+  jq -r '._additions[]?, ._updates[]? | "\(.id) | \(.name)"' "$plan"
+  read -r -p '请输入要导入的线路ID，多个用逗号分隔（输入 ALL 选择全部候选）：' selected_ids
+  if [[ "$selected_ids" == "ALL" || "$selected_ids" == "all" ]]; then
+    jq '{profile, schema_version, kind, generated_at, exits: (._additions + ._updates)}' "$plan" > "$selected_file"
+  else
+    jq --arg ids "$selected_ids" --slurpfile plan "$plan" '
+      ($ids | split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length>0))) as $wanted
+      | .exits = [ .exits[] | select(.id as $id | $wanted | index($id)) ]
+    ' "$path" > "$selected_file"
+  fi
+  if [[ ! -s "$selected_file" ]] || [[ "$(jq '.exits|length' "$selected_file")" -eq 0 ]]; then
+    rm -f "$plan" "$selected_file"; warn '没有选择有效线路，已取消。'; return 1
+  fi
+  if ! global_relay plan "$selected_file" "$DATA_FILE" "$mode" > "$plan"; then rm -f "$plan" "$selected_file"; return 1; fi
   added="$(jq '.add|length' "$plan")"; updated="$(jq '.update|length' "$plan")"
   duplicate="$(jq '.duplicates|length' "$plan")"; anomalies="$(jq '.anomalies|length' "$plan")"
   conflict="$(jq -r '.profile_conflict' "$plan")"
@@ -824,8 +842,8 @@ global_import_json(){
     rm -f "$plan"; info '没有可新增或更新的正常线路。'; return 0
   fi
   begin_change '导入Global线路前'
-  if ! global_relay apply "$path" "$DATA_FILE" "$mode" $allow; then rm -f "$plan"; rollback_change; return 1; fi
-  rm -f "$plan"
+  if ! global_relay apply "$selected_file" "$DATA_FILE" "$mode" $allow; then rm -f "$plan" "$selected_file"; rollback_change; return 1; fi
+  rm -f "$plan" "$selected_file"
   finish_change || return 1
   ok "导入处理完成：新增 $added 条、更新 $updated 条；异常 $anomalies 条未作为正常线路导入。"
   show_links
