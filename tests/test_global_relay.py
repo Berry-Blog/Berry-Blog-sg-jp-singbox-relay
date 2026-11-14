@@ -133,6 +133,40 @@ class GlobalRelayTests(unittest.TestCase):
         self.assertNotIn(entry["client_uuid"], (CLIENT, current["inbound_uuid"]))
         self.assertEqual(result["schema_version"], 5)
 
+    def test_manual_add_rejects_reserved_and_legacy_ids(self):
+        for line_id in ("direct", "jp", "us-pav"):
+            with self.subTest(line_id=line_id):
+                with self.assertRaises(ValueError):
+                    add_manual_exit(current_data(), doc()["profile"], line_id, "冲突线路", U1)
+
+    def test_manual_add_rejects_uuid_used_by_legacy_remote_outbound(self):
+        current = current_data()
+        with self.assertRaisesRegex(ValueError, "远端VLESS UUID"):
+            add_manual_exit(current, doc()["profile"], "global-biglobe", "日本 BIGLOBE",
+                            "dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+
+    def test_import_rejects_legacy_id_and_remote_uuid_collisions(self):
+        bad = doc()
+        bad["exits"][0]["id"] = "us-pav"
+        plan = plan_import(bad, current_data(), mode="incremental")
+        self.assertTrue(any(x["id"] == "us-pav" for x in plan["anomalies"]))
+        bad = doc()
+        bad["exits"][0]["uuid"] = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+        plan = plan_import(bad, current_data(), mode="incremental")
+        self.assertTrue(any("远端VLESS UUID冲突" in x["reason"] for x in plan["anomalies"]))
+
+    def test_manual_exit_is_explicitly_unverified(self):
+        parsed = parse_vless_uri(
+            f"vless://{U1}@209.33.166.81:40045?encryption=none&flow=xtls-rprx-vision"
+            f"&security=reality&sni=www.apple.com&fp=chrome&pbk={PUB}&sid=0123456789abcdef&type=tcp#BIGLOBE"
+        )
+        result = add_manual_exit(current_data(), parsed["profile"], "global-biglobe", "日本 BIGLOBE", U1)
+        entry = result["global_exits"][0]
+        self.assertEqual(entry["source"], "manual")
+        self.assertEqual(entry["verification"], "unverified")
+        self.assertNotIn("source_email", entry)
+        self.assertNotIn("source_outbound_tag", entry)
+
     def test_removing_profile_with_attached_exit_is_forbidden(self):
         current = current_data()
         current["global_profiles"] = [doc()["profile"]]
