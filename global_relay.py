@@ -191,9 +191,14 @@ def plan_import(document, current_data, mode="incremental"):
     current_by_id = {item.get("id"): item for item in current_exits if isinstance(item, dict)}
     current_global_uuids = {item.get("global_uuid"): item.get("id") for item in current_exits if isinstance(item, dict)}
     local_clients = _local_client_uuids(state)
+    legacy_ids = _legacy_line_ids(state)
     for row in doc["exits"]:
         reason = _exit_problem(row)
         line_id = row.get("id") if isinstance(row, dict) and isinstance(row.get("id"), str) else "unknown"
+        if not reason and line_id in {"direct", "jp"}:
+            reason = "线路ID与保留内置ID冲突"
+        if not reason and line_id in legacy_ids and line_id not in current_by_id:
+            reason = "线路ID与现有非Global线路冲突"
         if reason:
             anomalies.append({"id": line_id, "name": row.get("name", line_id) if isinstance(row, dict) else line_id, "reason": reason})
             continue
@@ -210,6 +215,9 @@ def plan_import(document, current_data, mode="incremental"):
         existing_uuid_owner = current_global_uuids.get(uid)
         if uid in local_clients:
             anomalies.append({"id": line_id, "name": row["name"], "reason": "Global UUID与本地客户端UUID冲突"})
+            continue
+        if uid in _remote_uuids(state, exclude_global_id=line_id if existing else None):
+            anomalies.append({"id": line_id, "name": row["name"], "reason": "Global UUID与现有非Global/其他远端VLESS UUID冲突"})
             continue
         if existing_uuid_owner is not None and existing_uuid_owner != line_id:
             anomalies.append({"id": line_id, "name": row["name"], "reason": "Global UUID已被其他线路使用"})
@@ -243,8 +251,36 @@ def _local_client_uuids(state):
     return result
 
 
+def _legacy_line_ids(state):
+    result = {"direct", "jp"}
+    for item in state.get("extra_exits", []) if isinstance(state.get("extra_exits"), list) else []:
+        if isinstance(item, dict) and isinstance(item.get("id"), str):
+            result.add(item["id"])
+    return result
+
+
+def _remote_uuids(state, exclude_global_id=None):
+    result = set()
+    for key in ("jp_uuid",):
+        value = state.get(key)
+        if isinstance(value, str) and value:
+            result.add(value.lower())
+    for item in state.get("extra_exits", []) if isinstance(state.get("extra_exits"), list) else []:
+        if isinstance(item, dict):
+            for key in ("uuid", "global_uuid"):
+                value = item.get(key)
+                if isinstance(value, str) and value:
+                    result.add(value.lower())
+    for item in state.get("global_exits", []) if isinstance(state.get("global_exits"), list) else []:
+        if isinstance(item, dict) and item.get("id") != exclude_global_id:
+            value = item.get("global_uuid")
+            if isinstance(value, str) and value:
+                result.add(value.lower())
+    return result
+
+
 def _new_client_uuid(state, forbidden):
-    global_uuids = {str(item.get("global_uuid", "")).lower() for item in state.get("global_exits", []) if isinstance(item, dict)}
+    global_uuids = _remote_uuids(state)
     used = _local_client_uuids(state) | global_uuids | {str(value).lower() for value in forbidden}
     for _ in range(16):
         value = str(uuidlib.uuid4())
@@ -254,12 +290,17 @@ def _new_client_uuid(state, forbidden):
 
 
 def _stored_exit(row, profile, client_uuid=None, previous=None):
-    return {"id": row["id"], "name": row["name"], "profile_id": profile["profile_id"],
-            "global_uuid": row["uuid"].lower(),
-            "client_uuid": (previous or {}).get("client_uuid") or client_uuid,
-            "enabled": (previous or {}).get("enabled", True),
-            "expected_exit_ip": row.get("expected_exit_ip"),
-            "source_email": row["email"], "source_outbound_tag": row["outbound_tag"]}
+    result = {"id": row["id"], "name": row["name"], "profile_id": profile["profile_id"],
+              "global_uuid": row["uuid"].lower(),
+              "client_uuid": (previous or {}).get("client_uuid") or client_uuid,
+              "enabled": (previous or {}).get("enabled", True),
+              "expected_exit_ip": row.get("expected_exit_ip")}
+    if row.get("email") and row.get("outbound_tag") and row.get("route_valid") is True:
+        result.update({"source": "global-json", "verification": "global-export-validated",
+                       "source_email": row["email"], "source_outbound_tag": row["outbound_tag"]})
+    else:
+        result.update({"source": "manual", "verification": "unverified"})
+    return result
 
 
 def apply_import(document, current_data, mode="incremental", allow_profile_update=False):
@@ -300,10 +341,12 @@ def add_manual_exit(current_data, profile, line_id, name, global_uuid):
         raise ValueError("线路名称无效")
     if not isinstance(global_uuid, str) or not _UUID_RE.fullmatch(global_uuid):
         raise ValueError("Global UUID格式无效")
-    if any(item.get("id") == line_id for item in state["global_exits"] + state.get("extra_exits", []) if isinstance(item, dict)):
-        raise ValueError("线路ID已存在")
-    if any(item.get("global_uuid", "").lower() == global_uuid.lower() for item in state["global_exits"] if isinstance(item, dict)):
-        raise ValueError("Global UUID已存在")
+    if line_id in {"direct", "jp"}:
+        raise ValueError("线路ID与保留内置ID冲突")
+    if line_id in _legacy_line_ids(state) or any(item.get("id") == line_id for item in state["global_exits"] if isinstance(item, dict)):
+        raise ValueError("线路ID已存在或与原有线路冲突")
+    if global_uuid.lower() in _remote_uuids(state):
+        raise ValueError("Global UUID与现有远端VLESS UUID冲突")
     if global_uuid.lower() in _local_client_uuids(state):
         raise ValueError("Global UUID与本地客户端UUID冲突")
     existing_profile = next((p for p in state["global_profiles"] if isinstance(p, dict) and p.get("profile_id") == profile["profile_id"]), None)
@@ -312,8 +355,7 @@ def add_manual_exit(current_data, profile, line_id, name, global_uuid):
     if not existing_profile:
         state["global_profiles"].append(profile)
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    row = {"id": line_id, "name": name.strip(), "uuid": global_uuid.lower(), "email": "manual@" + profile["profile_id"],
-           "outbound_tag": "manual", "enabled": True, "route_valid": True}
+    row = {"id": line_id, "name": name.strip(), "uuid": global_uuid.lower(), "enabled": True}
     state["global_exits"].append(_stored_exit(row, profile, _new_client_uuid(state, [global_uuid]), previous={"created_at": now}))
     state["schema_version"] = DATA_SCHEMA_VERSION
     return state
@@ -330,10 +372,12 @@ def edit_global_exit(current_data, old_id, new_id, name, global_uuid):
         raise ValueError("线路名称无效")
     if not isinstance(global_uuid, str) or not _UUID_RE.fullmatch(global_uuid):
         raise ValueError("Global UUID格式无效")
-    if any(e.get("id") == new_id and e is not target for e in state["global_exits"] + state.get("extra_exits", []) if isinstance(e, dict)):
-        raise ValueError("线路ID已存在")
-    if any(e.get("global_uuid", "").lower() == global_uuid.lower() and e is not target for e in state["global_exits"] if isinstance(e, dict)):
-        raise ValueError("Global UUID已被其他线路使用")
+    if new_id in {"direct", "jp"}:
+        raise ValueError("线路ID与保留内置ID冲突")
+    if new_id in _legacy_line_ids(state) or any(e.get("id") == new_id and e is not target for e in state["global_exits"] if isinstance(e, dict)):
+        raise ValueError("线路ID已存在或与原有线路冲突")
+    if global_uuid.lower() in _remote_uuids(state, exclude_global_id=old_id):
+        raise ValueError("Global UUID与现有远端VLESS UUID冲突")
     if global_uuid.lower() in _local_client_uuids(state):
         raise ValueError("Global UUID与本地客户端UUID冲突")
     target["id"], target["name"], target["global_uuid"] = new_id, name.strip(), global_uuid.lower()
