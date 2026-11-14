@@ -54,13 +54,13 @@ scp -P 40022 root@209.33.166.81:/etc/global-home-nodes/exports/dogma-relay.json 
 scp -P 40022 'D:\gpt项目\2global\dogma-relay.json' root@178.94.15.19:/root/global-relay.json
 ```
 
-登录狗妈执行 `chmod 600 /root/global-relay.json`，然后运行 `sb` → `21）Global 多家宽管理` → `1）从 JSON 文件导入 Global 家宽`。导入前会显示新增、更新、重复和异常预览；异常线路不会作为可用线路导入。默认采用增量导入，不会因文件缺少某条线路而自动删除现有线路。也可以在 `sb` → `21` → `2` 手动添加：第一次粘贴完整 Global VLESS Reality 链接或逐字段录入；后续线路只需选择同一个 profile 并输入新的 Global UUID。
+登录狗妈执行 `chmod 600 /root/global-relay.json`，然后运行 `sb` → `21）Global 多家宽管理` → `1）从 JSON 文件导入 Global 家宽`。导入候选会显示 `1、2、3…` 序号、线路名称和 ID；输入一个或多个序号（逗号分隔）选择，输入 `ALL` 选择所有正常候选。异常、重复及未选择的线路不会被导入。导入前仍会显示新增、更新、重复和异常预览；默认采用增量导入，不会因文件缺少某条线路而自动删除现有线路。也可以在 `sb` → `21` → `2` 手动添加：第一次粘贴完整 Global VLESS Reality 链接或逐字段录入；后续线路只需选择同一个 profile 并输入新的 Global UUID。
 
 Global profile 和各线路保存在 `/etc/sing-box/relay.json` 的独立字段中。Global UUID 只用于狗妈到 Global 的 VLESS 出站；狗妈客户端 UUID 单独生成。狗妈连接 Global 公网 VLESS Reality 地址，不使用 Global 内部 SOCKS5 地址。
 
 ## 统一线路管理
 
-所有线路在同一管理界面中操作：
+所有线路在同一管理界面中操作。线路列表会为每条线路显示序号和名称；修改、删除、设置默认出站时可输入该列表中的序号。显示 VLESS 链接时也会在链接前标出对应序号和线路名称，便于核对；保存到 `/etc/sing-box/export/vless.txt` 的文件仍保持一条链接一行，方便客户端导入：
 
 - **狗妈直出（direct）**：可修改线路名称、狗妈入口 IP/域名、映射端口及直出客户端 UUID。
 - **日本 BIGLOBE（jp）**：可修改名称、落地服务器 IP/域名、端口、Reality / SS 协议及对应认证参数。
