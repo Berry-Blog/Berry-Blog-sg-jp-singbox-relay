@@ -17,6 +17,8 @@ jobs:
           bash -n install.sh
           bash -n sb
           bash -n tests/test-config.sh
+          bash -n tests/test-global-relay.sh
+          python3 -m py_compile global_relay.py tests/test_global_relay.py
 
       - name: Check unified line manager wiring
         run: |
@@ -27,7 +29,12 @@ jobs:
           grep -Fq 'set_default_line(){' sb
           grep -Fq 'entrance_settings(){' sb
           grep -Fq 'migrate_legacy_data(){' sb
-          grep -Fq 'schema_version:4' sb
+          grep -Fq 'schema_version:5' sb
+          grep -Fq '21）Global 多家宽管理' sb
+          grep -Fq 'global_route_valid "$global_id"' sb
+          grep -Fq 'global_relay.py' install.sh
+          grep -Fq 'global_relay.py' sb
+          grep -Fq 'update_global_profile' global_relay.py
           grep -Fq 'REPO_RAW=' sb
           grep -Fq 'write_vless_links(){' sb
           grep -Fq 'write_clash_yaml(){' sb
@@ -57,3 +64,9 @@ jobs:
       - name: Validate legacy migration, unified routes and exports
         run: |
           bash tests/test-config.sh
+
+      - name: Validate Global imports, routes, UUID separation, links and status
+        run: |
+          python3 -m unittest tests/test_global_relay.py
+          bash tests/test-global-relay.sh
+

@@ -1,6 +1,6 @@
 # sing-box 狗妈多线路统一管理（SG / JP / Global / US / 更多）
 
-适用于 Alpine Linux x86_64 + OpenRC 的 sing-box 多落地机中转管理。狗妈作为统一 VLESS Reality 客户端入口，支持狗妈直出、日本 BIGLOBE、global、美国 PAV 及任意新增 Reality / Shadowsocks 出站线路。
+适用于 Alpine Linux x86_64 + OpenRC 的 sing-box 多落地机中转管理。狗妈作为统一 VLESS Reality 客户端入口，支持狗妈直出、日本 BIGLOBE、Global Home 多家宽，以及任意新增 Reality / Shadowsocks 出站线路。
 
 ## 一键安装
 
@@ -18,7 +18,7 @@ SSH 登录狗妈，执行：
 sb update
 ```
 
-也可以进入 `sb` 菜单，选择“更新 sb 管理脚本”。更新管理脚本不会重装 sing-box，也不会自动修改正在运行的节点配置。首次使用新版管理面板时，会把旧版 `relay.json` 自动迁移为 schema v4，保留现有 UUID、Reality 密钥、Short ID、端口、线路认证参数及订阅设置。
+也可以进入 `sb` 菜单，选择“更新 sb 管理脚本”。更新只替换管理脚本和 Global 线路辅助模块，不重装 sing-box，也不改现有线路。首次使用新版面板时，会把旧版 `relay.json` 自动迁移为 schema v5，保留已有 UUID、Reality 密钥、Short ID、端口、线路认证参数及订阅设置。
 
 ## 新版菜单
 
@@ -42,6 +42,21 @@ sb update
 18. 更新 sb 管理脚本。
 19. 更新 sing-box 核心。
 20. 卸载。
+21. Global 多家宽管理（JSON 导入、手动录入、增删改、客户端链接及分段状态检查）。
+
+## Global 家宽导入
+
+在 Global SSH 中执行 `gl`，选择“导出狗妈中转 JSON”。在 Windows PowerShell 5.1 中执行：
+
+```powershell
+New-Item -ItemType Directory -Force -Path 'D:\gpt项目\2global'
+scp -P 40022 root@209.33.166.81:/etc/global-home-nodes/exports/dogma-relay.json 'D:\gpt项目\2global\dogma-relay.json'
+scp -P 40022 'D:\gpt项目\2global\dogma-relay.json' root@178.94.15.19:/root/global-relay.json
+```
+
+登录狗妈执行 `chmod 600 /root/global-relay.json`，然后运行 `sb` → `21）Global 多家宽管理` → `1）从 JSON 文件导入 Global 家宽`。导入前会显示新增、更新、重复和异常预览；异常线路不会作为可用线路导入。默认采用增量导入，不会因文件缺少某条线路而自动删除现有线路。也可以在 `sb` → `21` → `2` 手动添加：第一次粘贴完整 Global VLESS Reality 链接或逐字段录入；后续线路只需选择同一个 profile 并输入新的 Global UUID。
+
+Global profile 和各线路保存在 `/etc/sing-box/relay.json` 的独立字段中。Global UUID 只用于狗妈到 Global 的 VLESS 出站；狗妈客户端 UUID 单独生成。狗妈连接 Global 公网 VLESS Reality 地址，不使用 Global 内部 SOCKS5 地址。
 
 ## 统一线路管理
 
@@ -64,6 +79,7 @@ sb update
 ## 配置与导出
 
 - 本地参数：`/etc/sing-box/relay.json`
+- Global JSON 协议：[`docs/global-home-dogma-relay.schema.json`](docs/global-home-dogma-relay.schema.json)
 - sing-box 运行配置：`/etc/sing-box/config.json`
 - VLESS 分享链接：`/etc/sing-box/export/vless.txt`
 - Clash YAML：`/etc/sing-box/export/clash.yaml`
@@ -84,4 +100,4 @@ sb update
 - Shadowsocks 落地必须预先在远端部署匹配的 SS 入站，并确保狗妈能访问其公网映射端口。
 - Reality 落地 UUID、Public Key、Short ID、SNI 必须与远端入站保持一致。
 - 脚本不会自动修改云服务商防火墙或端口映射。
-- GitHub Actions 运行配置与多线路增删改回归测试；测试不代表真实跨境网络连通性。
+- GitHub Actions 运行配置、Global JSON 校验、版本迁移和多线路增删改回归测试；测试不代表真实跨境网络连通性。
