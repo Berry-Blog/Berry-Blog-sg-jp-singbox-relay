@@ -809,7 +809,7 @@ global_import_json(){
   jq -r '._additions[]?, ._updates[]? | "\(.id) | \(.name)"' "$plan"
   read -r -p '请输入要导入的线路ID，多个用逗号分隔（输入 ALL 选择全部候选）：' selected_ids
   if [[ "$selected_ids" == "ALL" || "$selected_ids" == "all" ]]; then
-    jq '{profile, schema_version, kind, generated_at, exits: (._additions + ._updates)}' "$plan" > "$selected_file"
+    cp "$path" "$selected_file"
   else
     jq --arg ids "$selected_ids" --slurpfile plan "$plan" '
       ($ids | split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length>0))) as $wanted
