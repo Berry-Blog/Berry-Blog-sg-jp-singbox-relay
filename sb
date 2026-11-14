@@ -840,7 +840,7 @@ global_import_json(){
   selected_ids_file="$(mktemp "$CONFIG_DIR/global-relay-selection.XXXXXX")"
   if ! global_relay plan "$path" "$DATA_FILE" "$mode" > "$plan"; then rm -f "$plan" "$selected_file" "$selected_ids_file"; return 1; fi
   mapfile -t candidates < <(jq -c '._additions[]?, ._updates[]?' "$plan")
-  if ((${#candidates[@]} == 0));
+  if ((${#candidates[@]} == 0)); then
     rm -f "$plan" "$selected_file" "$selected_ids_file"
     info '没有可导入的正常线路。'
     return 0
