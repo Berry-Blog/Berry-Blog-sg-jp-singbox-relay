@@ -238,7 +238,7 @@ ensure_direct_uuid(){
   uuid="$(get direct_uuid)"
   if [[ -z "$uuid" ]]; then
     uuid="$("$BIN" generate uuid)"
-    valid_uuid "$uuid" || die "生成新加坡直出 UUID 失败。"
+    valid_uuid "$uuid" || die "生成直出线路 UUID 失败。"
     set_string direct_uuid "$uuid"
   fi
 }
@@ -585,7 +585,7 @@ add_extra_exit(){
   local id entry
   id="$(ask_value '落地机 ID（例如 us-pav，英文小写+数字+连字符）' 'us-pav')"
   valid_exit_id "$id" || { warn "ID 必须以字母开头，2~32 位，仅含小写字母、数字和连字符。"; return 0; }
-  if extra_exists "$id"; then warn "ID 已存在，请选择菜单 35 修改。"; return 0; fi
+  if extra_exists "$id"; then warn "ID 已存在，请在统一线路管理中选择修改。"; return 0; fi
   info "仅修改新加坡中转机；请确认远端已部署对应服务且端口映射已生效。"
   entry="$(prompt_extra_json "$id" '{}')" || { warn "新增取消，现有线路未改变。"; return 0; }
   begin_change "添加-$id-落地机前"
@@ -1222,11 +1222,11 @@ rotate_direct_uuid(){
   local uuid
   uuid="$("$BIN" generate uuid)"
   valid_uuid "$uuid" || die "生成 UUID 失败。"
-  begin_change "重新生成新加坡直出UUID前"
+  begin_change "重新生成直出UUID前"
   set_string direct_uuid "$uuid"
   if [[ "$(get deployment_mode)" == "direct" ]]; then set_string inbound_uuid "$uuid"; fi
   finish_change
-  ok "新加坡直出节点 UUID 已更新；日本中转节点不受影响。"
+  ok "直出线路 UUID 已更新；其他线路不受影响。"
   show_links
 }
 change_sni(){
@@ -1262,7 +1262,7 @@ config_check(){
   while IFS= read -r global_id; do
     [[ -n "$global_id" ]] || continue
     if ! global_route_valid "$global_id"; then
-      warn "Global线路 $global_id 的狗妈用户、VLESS出站或路由规则不一致；请重新应用双节点配置。"
+      warn "Global线路 $global_id 的狗妈用户、VLESS出站或路由规则不一致；请重新应用全部线路配置。"
       return 1
     fi
   done < <(jq -r '.global_exits[]? | select(.enabled != false) | .id' "$DATA_FILE")
@@ -1373,7 +1373,7 @@ update_core(){
 }
 subscription_enable(){
   need_data
-  [[ -n "$(get direct_uuid)" ]] || die "请先选择菜单 9 应用双节点配置，再启用 Clash 订阅。"
+  [[ -n "$(get direct_uuid)" ]] || die "请先完成首次部署，再应用全部线路配置并启用 Clash 订阅。"
   write_exports
   local HTTPD_BIN
   if ! HTTPD_BIN="$(find_httpd_binary)"; then
