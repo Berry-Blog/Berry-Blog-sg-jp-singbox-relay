@@ -3,7 +3,7 @@ set -Eeuo pipefail
 export LANG=C.UTF-8
 
 REPO_RAW="https://raw.githubusercontent.com/Berry-Blog/Berry-Blog-sg-jp-singbox-relay/main"
-SB_VERSION="2026-11-15-global-home-3"
+SB_VERSION="2026-11-15-global-home-4"
 CONFIG_DIR="/etc/sing-box"
 DATA_FILE="$CONFIG_DIR/relay.json"
 CONFIG_FILE="$CONFIG_DIR/config.json"
@@ -1048,6 +1048,89 @@ global_remove_exit(){
   finish_change || return 1
   ok 'Global线路及对应狗妈配置已删除，其余线路保持不变。'
 }
+global_delete_entries(){
+  jq -c '[.global_exits[]? | select(type=="object") | {id:.id,name:(.name // .id),enabled:(.enabled != false)}]' "$DATA_FILE"
+}
+global_delete_entries_list(){
+  local entries="$1"
+  jq -r 'to_entries[] | "\(.key+1)) \(.value.name) | ID=\(.value.id) | 状态=\(if .value.enabled then "启用" else "禁用" end)"' <<< "$entries"
+}
+global_remove_exits_batch(){
+  local entries count selection raw_index index number id name invalid confirm selected_id
+  local -a indices=() selected_ids=()
+  entries="$(global_delete_entries)" || return 1
+  [[ "$entries" != '[]' ]] || { info '当前没有 Global 家宽线路。'; return 0; }
+  count="$(jq 'length' <<< "$entries")"
+  echo '========== 批量删除候选线路（含禁用线路） =========='
+  global_delete_entries_list "$entries"
+  while true; do
+    read -r -p '请输入要删除的线路序号，多个序号用逗号分隔：' selection
+    if [[ ! "$selection" =~ ^[[:space:]]*[0-9]+([[:space:]]*,[[:space:]]*[0-9]+)*[[:space:]]*$ ]]; then
+      warn '请输入上方线路序号，多个序号用逗号分隔。'
+      continue
+    fi
+    IFS=',' read -r -a indices <<< "$selection"
+    selected_ids=()
+    invalid=0
+    for raw_index in "${indices[@]}"; do
+      index="${raw_index//[[:space:]]/}"
+      if [[ ! "$index" =~ ^[0-9]{1,3}$ ]]; then
+        warn "无效序号：$raw_index"
+        invalid=1
+        break
+      fi
+      number=$((10#$index))
+      if (( number < 1 || number > count )); then
+        warn "序号 $number 超出范围（1-$count）。"
+        invalid=1
+        break
+      fi
+      id="$(jq -r --argjson index "$number" '.[$index-1].id' <<< "$entries")"
+      for selected_id in "${selected_ids[@]}"; do
+        if [[ "$selected_id" == "$id" ]]; then id=''; break; fi
+      done
+      [[ -z "$id" ]] || selected_ids+=("$id")
+    done
+    (( invalid == 0 )) || continue
+    break
+  done
+  echo
+  printf '即将删除 %s 条线路及对应的狗妈用户、出站和路由：\n' "${#selected_ids[@]}"
+  for id in "${selected_ids[@]}"; do
+    name="$(jq -r --arg id "$id" '.[] | select(.id==$id) | .name' <<< "$entries")"
+    printf '  - %s [%s]\n' "$name" "$id"
+  done
+  read -r -p '确认批量删除以上线路？[y/N]：' confirm
+  [[ "$confirm" == y || "$confirm" == Y ]] || { info '已取消。'; return 0; }
+  begin_change '批量删除Global线路前'
+  for id in "${selected_ids[@]}"; do
+    if ! global_relay remove-exit "$DATA_FILE" "$id" >/dev/null; then rollback_change; return 1; fi
+  done
+  finish_change || return 1
+  ok "批量删除完成：已删除 ${#selected_ids[@]} 条 Global 家宽线路；其他线路及公共参数保持不变。"
+}
+global_remove_all_exits(){
+  local entries count id name confirm
+  entries="$(global_delete_entries)" || return 1
+  count="$(jq 'length' <<< "$entries")"
+  if (( count == 0 )); then
+    info '当前没有 Global 家宽线路。'
+    return 0
+  fi
+  echo '========== 将删除全部 Global 家宽线路 =========='
+  global_delete_entries_list "$entries"
+  printf '\n此操作会删除 %s 条 Global 线路及对应的狗妈用户、出站和路由。\n' "$count"
+  echo '共享公共参数 Profile、直出线路、日本线路及其他线路会保留。'
+  read -r -p '输入 DELETE 确认删除全部 Global 家宽线路：' confirm
+  [[ "$confirm" == DELETE ]] || { info '确认文字不匹配，已取消。'; return 0; }
+  begin_change '删除全部Global线路前'
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    if ! global_relay remove-exit "$DATA_FILE" "$id" >/dev/null; then rollback_change; return 1; fi
+  done < <(jq -r '.[].id' <<< "$entries")
+  finish_change || return 1
+  ok "已删除全部 $count 条 Global 家宽线路；共享公共参数及其他线路保持不变。"
+}
 global_edit_profile(){
   local id profile_file name server public_port sni fingerprint flow public_key short_id network security confirm
   id="$(global_select_profile)" || return 1
@@ -1163,6 +1246,8 @@ global_menu(){
     echo '6）显示全部客户端 VLESS 链接'
     echo '7）检查 Global 线路连接状态'
     echo '8）修改 Global 公共参数'
+    echo '9）批量删除 Global 家宽线路'
+    echo '10）删除全部 Global 家宽线路（保留公共参数）'
     echo '0）返回'
     read -r -p '请选择：' action
     case "$action" in
@@ -1174,6 +1259,8 @@ global_menu(){
       6) global_show_links ;;
       7) global_status ;;
       8) global_edit_profile ;;
+      9) global_remove_exits_batch ;;
+      10) global_remove_all_exits ;;
       0) return 0 ;;
       *) warn '无效选项。' ;;
     esac
