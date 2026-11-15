@@ -123,6 +123,11 @@ install -m 0644 "$TMP/global_relay.py" /usr/local/libexec/sb/global_relay.py
 info "进入首次部署菜单；请选择本机直出或狗妈中转配置..."
 /usr/local/bin/sb menu
 
+if [[ ! -x "$BIN" || ! -x /usr/local/bin/sb || ! -e "$SERVICE" ]]; then
+  warn "安装菜单已退出或 sing-box 已卸载；没有继续执行配置检查。"
+  exit 0
+fi
+
 if [[ ! -s "$CONFIG_DIR/config.json" ]]; then
   warn "核心和管理命令已安装，但尚未完成初始化。以后运行 sb 并选择功能 1 或 2 即可继续。"
   exit 0
