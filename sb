@@ -1468,8 +1468,8 @@ subscription_disable(){
 }
 setup_direct(){
   need_root
-  if [[ -s "$DATA_FILE" ]]; then
-    warn "检测到已有配置；本机基础配置不会覆盖现有线路。"
+  if [[ -e "$DATA_FILE" || -e "$CONFIG_FILE" ]]; then
+    warn "检测到已有数据或运行配置；本机基础配置不会覆盖现有线路。"
     return 0
   fi
   [[ -x "$BIN" ]] || die "未找到 sing-box 核心，请先运行安装程序。"
@@ -1564,7 +1564,10 @@ OPENRC
 
 setup_relay(){
   need_root
-  if [[ -s "$DATA_FILE" ]]; then warn "检测到已有配置，不能覆盖；请使用线路管理修改现有配置。"; return 0; fi
+  if [[ -e "$DATA_FILE" || -e "$CONFIG_FILE" ]]; then
+    warn "检测到已有数据或运行配置，不能覆盖；请使用线路管理修改现有配置。"
+    return 0
+  fi
   mkdir -p "$CONFIG_DIR" "$EXPORT_DIR" "$BACKUP_ROOT"
   chmod 700 "$CONFIG_DIR" "$EXPORT_DIR" "$BACKUP_ROOT"
   local entrance_name direct_name jp_name public_host public_port listen_address listen_port inbound_sni jp_host jp_port jp_sni
