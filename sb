@@ -1486,6 +1486,7 @@ setup_direct(){
   else
     public_host="$(ask_value '客户端连接公网IP/DDNS域名（请手动填写）' '')"
   fi
+  info "请确认防火墙已放行公网端口；如果公网映射端口与本机监听端口不同，需要配置端口转发。"
   public_port="$(ask_port '客户端连接公网映射端口' '30010')"
   listen_address="$(ask_value '本机监听地址' '0.0.0.0')"
   listen_port="$(ask_port '本机监听端口' '10010')"
@@ -1661,6 +1662,7 @@ OPENRC
 }
 uninstall_singbox(){
   need_root
+  local uninstall_choice confirm snapshot
   echo "1）卸载程序和服务，保留配置（会先创建备份）"
   echo "2）完全卸载程序、服务和配置，保留历史备份（会先创建备份）"
   echo "3）彻底卸载并删除所有配置和历史备份，不创建备份"
@@ -1668,7 +1670,6 @@ uninstall_singbox(){
   read -r -p "请选择： " uninstall_choice
   case "$uninstall_choice" in
     1|2)
-      local snapshot
       snapshot="$(backup_state "卸载前备份")"
       ;;
     3)
