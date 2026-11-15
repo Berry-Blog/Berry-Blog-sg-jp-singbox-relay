@@ -1718,45 +1718,40 @@ menu(){
         "$(get entrance_name)" "$(get public_host)" "$(get public_port)" "$(get listen_address)" "$(get listen_port)"
       printf '启用线路：%s | 默认出站：%s | 版本：%s\n' \
         "$(line_array | jq 'length')" "$(get default_exit)" "$SB_VERSION"
-      cat <<'MENU'
- 1）初始化部署本机基础配置（VLESS Reality直出）
- 2）初始化部署狗妈中转配置
- 3）修改线路连接IP/DDNS
- 4）线路总览（名称、协议、服务器 IP、端口）
- 5）显示全部线路认证参数
- 6）显示全部 VLESS 一键导入链接
- 7）导出 Clash Meta / Mihomo 配置文件
- 8）启用 Clash 远程订阅服务（HTTPS，需配置反向代理）
- 9）查看当前 Clash 订阅链接
-10）重新生成订阅访问令牌
-11）关闭 Clash 订阅服务
-12）应用/修复全部线路配置
-13）统一线路管理（添加、修改、删除、设置默认出站）
-14）狗妈入口设置（名称、IP、映射端口、监听端口、SNI）
-15）检查 sing-box 配置
-16）启动 / 停止 / 重启 sing-box
-17）查看服务状态、监听端口
-18）查看最近日志
-19）备份当前配置
-20）恢复历史备份
-21）更新 sb 管理脚本（从 GitHub 拉取最新版）
-22）更新 sing-box 核心
-23）卸载 sing-box
-24）Global 多家宽管理
- 0）退出
-MENU
     else
-      echo "尚未初始化，请先选择部署方式："
-      cat <<'MENU'
- 1）初始化部署本机基础配置（VLESS Reality直出）
- 2）初始化部署狗妈中转配置
- 0）退出
-MENU
+      printf '尚未初始化；部署完成后可使用线路管理功能。版本：%s\n' "$SB_VERSION"
     fi
+    cat <<'MENU'
+  1）初始化部署本机基础配置（VLESS Reality直出）
+  2）初始化部署狗妈中转配置
+  3）修改线路连接IP/DDNS
+  4）线路总览（名称、协议、服务器 IP、端口）
+  5）显示全部线路认证参数
+  6）显示全部 VLESS 一键导入链接
+  7）导出 Clash Meta / Mihomo 配置文件
+  8）启用 Clash 远程订阅服务（HTTPS，需配置反向代理）
+  9）查看当前 Clash 订阅链接
+ 10）重新生成订阅访问令牌
+ 11）关闭 Clash 订阅服务
+ 12）应用/修复全部线路配置
+ 13）统一线路管理（添加、修改、删除、设置默认出站）
+ 14）狗妈入口设置（名称、IP、映射端口、监听端口、SNI）
+ 15）检查 sing-box 配置
+ 16）启动 / 停止 / 重启 sing-box
+ 17）查看服务状态、监听端口
+ 18）查看最近日志
+ 19）备份当前配置
+ 20）恢复历史备份
+ 21）更新 sb 管理脚本（从 GitHub 拉取最新版）
+ 22）更新 sing-box 核心
+ 23）卸载 sing-box
+ 24）Global 多家宽管理
+  0）退出
+MENU
     echo
     read -r -p "请输入功能编号： " choice
-    if [[ ! -s "$DATA_FILE" && ! "$choice" =~ ^(0|1|2)$ ]]; then
-      warn "尚未初始化；请先选择功能 1 或 2。"
+    if [[ ! -s "$DATA_FILE" && ! "$choice" =~ ^(0|1|2|21|22|23)$ ]]; then
+      warn "尚未初始化；请先选择 1 或 2 部署。更新脚本、更新核心和卸载功能仍可使用。"
     else
       case "$choice" in
         1) setup_direct ;;
