@@ -120,8 +120,13 @@ ln -sf /usr/local/bin/sb /usr/bin/sb
 install -d -m 0755 /usr/local/libexec/sb
 install -m 0644 "$TMP/global_relay.py" /usr/local/libexec/sb/global_relay.py
 
-info "进入首次配置..."
-/usr/local/bin/sb setup
+info "进入首次部署菜单；请选择本机直出或狗妈中转配置..."
+/usr/local/bin/sb menu
+
+if [[ ! -s "$CONFIG_DIR/config.json" ]]; then
+  warn "核心和管理命令已安装，但尚未完成初始化。以后运行 sb 并选择功能 1 或 2 即可继续。"
+  exit 0
+fi
 
 info "检查服务状态..."
 rc-service sing-box status
