@@ -1056,10 +1056,11 @@ global_delete_entries_list(){
   jq -r 'to_entries[] | "\(.key+1)) \(.value.name) | ID=\(.value.id) | 状态=\(if .value.enabled then "启用" else "禁用" end)"' <<< "$entries"
 }
 global_remove_exits_batch(){
-  local entries selection raw_index index number id name invalid confirm selected_id
+  local entries count selection raw_index index number id name invalid confirm selected_id
   local -a indices=() selected_ids=()
   entries="$(global_delete_entries)" || return 1
   [[ "$entries" != '[]' ]] || { info '当前没有 Global 家宽线路。'; return 0; }
+  count="$(jq 'length' <<< "$entries")"
   echo '========== 批量删除候选线路（含禁用线路） =========='
   global_delete_entries_list "$entries"
   while true; do
@@ -1079,8 +1080,8 @@ global_remove_exits_batch(){
         break
       fi
       number=$((10#$index))
-      if (( number < 1 || number > $(jq 'length' <<< "$entries") )); then
-        warn "序号 $number 超出范围。"
+      if (( number < 1 || number > count )); then
+        warn "序号 $number 超出范围（1-$count）。"
         invalid=1
         break
       fi
