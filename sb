@@ -62,7 +62,7 @@ migrate_legacy_data(){
     | .extra_exits=((.extra_exits // []) | map(.name=(.name // .id)))
     | .global_profiles=(.global_profiles // [])
     | .global_exits=(.global_exits // [])
-    | .default_exit=(.default_exit // (if (.jp_enabled // true) then "jp" elif (.direct_enabled // true) then "direct" else ((.extra_exits[0].id) // "direct") end))
+    | .default_exit=(.default_exit // (if (.jp_enabled != false) then "jp" elif (.direct_enabled != false) then "direct" else ((.extra_exits[0].id) // "direct") end))
   ' "$DATA_FILE" > "$tmp"
   chmod 600 "$tmp"
   if ! cmp -s "$tmp" "$DATA_FILE"; then mv -f "$tmp" "$DATA_FILE"; else rm -f "$tmp"; fi
@@ -72,11 +72,11 @@ line_array(){
   jq -c '
     . as $state |
     [
-      (if (.direct_enabled // true) then {
+      (if (.direct_enabled != false) then {
         id:"direct",name:(.direct_name // "狗妈直出"),protocol:"direct",
         host:.public_host,port:.public_port,client_uuid:.direct_uuid
       } else empty end),
-      (if (.jp_enabled // true) then {
+      (if (.jp_enabled != false) then {
         id:"jp",name:(.jp_name // "日本 BIGLOBE"),protocol:(.mode // "reality"),
         host:.jp_host,port:(if .mode=="ss" then (.jp_ss_port // .jp_port) else .jp_port end),
         client_uuid:.inbound_uuid,uuid:.jp_uuid,public_key:.jp_public_key,
@@ -89,7 +89,7 @@ line_array(){
       method:(.method // ""),password:(.password // "")
     })) + (($state.global_exits // []) | map(. as $exit
       | ($state.global_profiles[]? | select(.profile_id==$exit.profile_id)) as $profile
-      | select($profile != null and ($exit.enabled // true)==true)
+      | select($profile != null and ($exit.enabled != false))
       | {
           id:$exit.id,name:($exit.name // $exit.id),protocol:"reality",
           host:$profile.server,port:$profile.public_port,
@@ -103,8 +103,8 @@ line_array(){
 line_exists(){
   local id="$1"
   case "$id" in
-    direct) jq -e '(.direct_enabled // true)==true' "$DATA_FILE" >/dev/null ;;
-    jp) jq -e '(.jp_enabled // true)==true' "$DATA_FILE" >/dev/null ;;
+    direct) jq -e '(.direct_enabled != false)==true' "$DATA_FILE" >/dev/null ;;
+    jp) jq -e '(.jp_enabled != false)==true' "$DATA_FILE" >/dev/null ;;
     *) extra_exists "$id" ;;
   esac
 }
@@ -1099,7 +1099,7 @@ global_route_valid(){
   local id="$1" user="sg-via-$1" outbound="to-extra-$1" check
   check="$(jq -c -n --arg id "$id" --arg user "$user" --arg outbound "$outbound" \
     --slurpfile state "$DATA_FILE" --slurpfile config "$CONFIG_FILE" '
-    ($state[0].global_exits // [] | map(select(.id==$id and (.enabled // true)==true)) | .[0]) as $exit |
+    ($state[0].global_exits // [] | map(select(.id==$id and (.enabled != false))) | .[0]) as $exit |
     ($state[0].global_profiles // [] | map(select(.profile_id==$exit.profile_id)) | .[0]) as $profile |
     ([ $config[0].inbounds[]?.users[]? | select(.name==$user and .uuid==$exit.client_uuid) ]) as $users |
     ([ $config[0].outbounds[]? | select(.tag==$outbound and .type=="vless" and .server==$profile.server and .server_port==$profile.public_port and .uuid==$exit.global_uuid) ]) as $outbounds |
