@@ -3,7 +3,7 @@ set -Eeuo pipefail
 export LANG=C.UTF-8
 
 REPO_RAW="https://raw.githubusercontent.com/Berry-Blog/Berry-Blog-sg-jp-singbox-relay/main"
-SB_VERSION="2026-11-15-global-home-5"
+SB_VERSION="2026-11-15-global-home-6"
 CONFIG_DIR="/etc/sing-box"
 DATA_FILE="$CONFIG_DIR/relay.json"
 CONFIG_FILE="$CONFIG_DIR/config.json"
@@ -213,7 +213,6 @@ set_number(){
   mv -f "$tmp" "$DATA_FILE"
 }
 begin_change(){
-  CHANGE_SNAPSHOT="$(backup_state "$1")"
   CHANGE_OLD_DATA="$(mktemp)"
   CHANGE_OLD_CONFIG="$(mktemp)"
   cp -a "$DATA_FILE" "$CHANGE_OLD_DATA"
@@ -231,7 +230,7 @@ finish_change(){
   if ! rc-service sing-box restart; then rollback_change; return 1; fi
   rm -f "$CHANGE_OLD_DATA" "$CHANGE_OLD_CONFIG"
   write_exports
-  ok "配置已更新并重启服务。修改前备份：$CHANGE_SNAPSHOT"
+  ok "配置已更新并重启服务。"
 }
 ensure_direct_uuid(){
   local uuid
@@ -771,12 +770,11 @@ set_default_line(){
 }
 change_line_ip(){
   need_data
-  local current host old_data snapshot
+  local current host old_data
   current="$(get public_host)"
   host="$(ask_value '线路连接公网IP/DDNS域名' "$current")"
   valid_host "$host" || { warn "IP 或域名格式无效，线路地址未修改。"; return 1; }
   [[ "$host" != "$current" ]] || { info "线路连接地址未变化。"; return 0; }
-  snapshot="$(backup_state "修改线路IP前")"
   old_data="$(mktemp)"
   cp -p "$DATA_FILE" "$old_data"
   set_string public_host "$host"
@@ -784,12 +782,11 @@ change_line_ip(){
     cp -p "$old_data" "$DATA_FILE"
     rm -f "$old_data"
     write_exports || true
-    warn "导出文件刷新失败，已恢复原线路地址；备份：$snapshot"
+    warn "导出文件刷新失败，已恢复原线路地址。"
     return 1
   fi
   rm -f "$old_data"
   ok "线路连接地址已更新。无需重装或重启；UUID、Reality密钥、端口和落地参数均未改变。"
-  printf '修改前备份：%s\n' "$snapshot"
   show_links
 }
 
@@ -1314,7 +1311,6 @@ apply_dual_nodes(){
   ok "全部已启用线路配置已应用。"
   printf '当前默认出站：%s\n' "$(get default_exit)"
   printf '启用线路：%s 条\n' "$(line_array | jq 'length')"
-  printf '修改前备份：%s\n' "$CHANGE_SNAPSHOT"
   show_links
 }
 rotate_direct_uuid(){
@@ -1392,7 +1388,6 @@ restore_menu(){
   ((selected > 0)) || return 0
   source="$(printf '%s\n' "$list" | awk -v n="$selected" 'NR==n {print; exit}')/sing-box"
   [[ -s "$source/relay.json" && -s "$source/config.json" ]] || { warn "所选备份不包含完整配置。"; return 1; }
-  backup_state "恢复前备份" >/dev/null
   rc-service sing-box stop 2>/dev/null || true
   rm -rf "$CONFIG_DIR"
   cp -a "$source" "$CONFIG_DIR"
@@ -1437,7 +1432,7 @@ update_manager(){
   exec /usr/local/bin/sb
 }
 update_core(){
-  local tmp tag version asset digest url candidate old snapshot
+  local tmp tag version asset digest url candidate old
   tmp="$(mktemp -d)"
   info "正在查询 sing-box 最新稳定版..."
   curl -fsSL --connect-timeout 15 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" -o "$tmp/release.json"
@@ -1455,7 +1450,6 @@ update_core(){
   candidate="$(find "$tmp" -type f -name sing-box | head -n1)"
   [[ -n "$candidate" ]] || die "压缩包中没有 sing-box 核心。"
   "$candidate" check -c "$CONFIG_FILE"
-  snapshot="$(backup_state "更新核心前")"
   old="$tmp/sing-box.old"
   cp -a "$BIN" "$old"
   install -m 0755 "$candidate" "$BIN.new"
@@ -1468,7 +1462,6 @@ update_core(){
   fi
   rm -rf "$tmp"
   ok "核心更新完成：$("$BIN" version | head -n1)"
-  info "更新前备份：$snapshot"
 }
 subscription_enable(){
   need_data
@@ -1491,7 +1484,6 @@ subscription_enable(){
   base="$(printf '%s' "$base" | sed 's:/*$::')"
   old_token="$(get sub_token)"
   token="$(openssl rand -hex 32)"
-  backup_state "启用订阅服务前" >/dev/null
   [[ -z "$old_token" ]] || rm -rf "$SUB_ROOT/$old_token"
   set_number sub_listen_port "$port"
   set_string sub_base_url "$base"
@@ -1545,7 +1537,6 @@ subscription_rotate(){
   old="$(get sub_token)"
   [[ -n "$old" ]] || die "尚未启用订阅服务。"
   token="$(openssl rand -hex 32)"
-  backup_state "重置订阅令牌前" >/dev/null
   set_string sub_token "$token"
   rm -rf "$SUB_ROOT/$old"
   write_exports
@@ -1761,18 +1752,16 @@ OPENRC
 }
 uninstall_singbox(){
   need_root
-  local uninstall_choice confirm snapshot
-  echo "1）卸载程序和服务，保留配置（会先创建备份）"
-  echo "2）完全卸载程序、服务和配置，保留历史备份（会先创建备份）"
-  echo "3）彻底卸载并删除所有配置和历史备份，不创建备份"
+  local uninstall_choice confirm
+  echo "1）卸载程序和服务，保留配置（不自动创建备份）"
+  echo "2）完全卸载程序、服务和配置，保留历史备份（不自动创建备份）"
+  echo "3）彻底卸载并删除所有配置和历史备份"
   echo "0）取消"
   read -r -p "请选择： " uninstall_choice
   case "$uninstall_choice" in
-    1|2)
-      snapshot="$(backup_state "卸载前备份")"
-      ;;
+    1|2) : ;;
     3)
-      warn "这会删除配置、订阅文件、Global线路数据和全部历史备份，且不会创建新备份。"
+      warn "这会删除配置、订阅文件、Global线路数据和全部历史备份。"
       read -r -p '确认彻底卸载？输入 DELETE 继续：' confirm
       [[ "$confirm" == "DELETE" ]] || { info "已取消；没有删除文件。"; return 0; }
       ;;
@@ -1788,18 +1777,18 @@ uninstall_singbox(){
   rm -f /usr/local/bin/sb /usr/bin/sb "$BIN" /usr/bin/sing-box
   case "$uninstall_choice" in
     1)
-      ok "sing-box 程序和服务已卸载，配置保留。卸载前备份：$snapshot"
+      ok "sing-box 程序和服务已卸载，配置保留。没有创建新备份。"
       ;;
     2)
       rm -rf "$CONFIG_DIR" "$SUB_ROOT" /usr/local/libexec/sb
       rm -f /var/log/sing-box.log /var/log/sing-box.err /var/log/sb-subscription.log /var/log/sb-subscription.err
-      ok "sing-box 程序、服务和配置已完全卸载；历史备份保留。卸载前备份：$snapshot"
+      ok "sing-box 程序、服务和配置已完全卸载；历史备份保留，没有创建新备份。"
       ;;
     3)
       rm -rf "$CONFIG_DIR" "$SUB_ROOT" "$BACKUP_ROOT" /usr/local/libexec/sb
       rm -f /var/log/sing-box.log /var/log/sing-box.err /var/log/sb-subscription.log /var/log/sb-subscription.err
       rm -f /root/deploy-sg-reality.sh /root/finish-sg-reality.sh
-      ok "sing-box 已彻底卸载；配置和历史备份已删除，未创建新备份。"
+      ok "sing-box 已彻底卸载；配置和历史备份已删除。"
       ;;
   esac
   exit 0
