@@ -3,7 +3,7 @@ set -Eeuo pipefail
 export LANG=C.UTF-8
 
 REPO_RAW="https://raw.githubusercontent.com/Berry-Blog/Berry-Blog-sg-jp-singbox-relay/main"
-SB_VERSION="2026-11-15-global-home-4"
+SB_VERSION="2026-11-15-global-home-5"
 CONFIG_DIR="/etc/sing-box"
 DATA_FILE="$CONFIG_DIR/relay.json"
 CONFIG_FILE="$CONFIG_DIR/config.json"
@@ -1110,26 +1110,38 @@ global_remove_exits_batch(){
   ok "批量删除完成：已删除 ${#selected_ids[@]} 条 Global 家宽线路；其他线路及公共参数保持不变。"
 }
 global_remove_all_exits(){
-  local entries count id name confirm
+  local entries profiles count profile_count id name confirm profile_id
   entries="$(global_delete_entries)" || return 1
+  profiles="$(jq -c '[.global_profiles[]? | select(type=="object") | {profile_id:(.profile_id // ""),name:(.name // .profile_id // "未命名")}] | unique_by(.profile_id)' "$DATA_FILE")" || return 1
   count="$(jq 'length' <<< "$entries")"
-  if (( count == 0 )); then
-    info '当前没有 Global 家宽线路。'
+  profile_count="$(jq 'length' <<< "$profiles")"
+  if (( count == 0 && profile_count == 0 )); then
+    info '当前没有 Global 家宽线路或公共参数。'
     return 0
   fi
-  echo '========== 将删除全部 Global 家宽线路 =========='
-  global_delete_entries_list "$entries"
-  printf '\n此操作会删除 %s 条 Global 线路及对应的狗妈用户、出站和路由。\n' "$count"
-  echo '共享公共参数 Profile、直出线路、日本线路及其他线路会保留。'
-  read -r -p '输入 DELETE 确认删除全部 Global 家宽线路：' confirm
+  echo '========== 将删除全部 Global 家宽线路和公共参数 =========='
+  if (( count > 0 )); then
+    global_delete_entries_list "$entries"
+  fi
+  if (( profile_count > 0 )); then
+    printf '\n将同时删除 %s 组 Global 公共参数：\n' "$profile_count"
+    jq -r 'to_entries[] | "\(.key+1)) \(.value.name) | ID=\(.value.profile_id)"' <<< "$profiles"
+  fi
+  printf '\n此操作会删除 %s 条 Global 线路及对应的狗妈用户、出站和路由，并删除 %s 组 Global 公共参数。\n' "$count" "$profile_count"
+  echo '直出线路、日本线路及其他线路会保留。'
+  read -r -p '输入 DELETE 确认删除全部 Global 家宽线路和公共参数：' confirm
   [[ "$confirm" == DELETE ]] || { info '确认文字不匹配，已取消。'; return 0; }
-  begin_change '删除全部Global线路前'
+  begin_change '删除全部Global线路和公共参数前'
   while IFS= read -r id; do
     [[ -n "$id" ]] || continue
     if ! global_relay remove-exit "$DATA_FILE" "$id" >/dev/null; then rollback_change; return 1; fi
   done < <(jq -r '.[].id' <<< "$entries")
+  while IFS= read -r profile_id; do
+    [[ -n "$profile_id" ]] || continue
+    if ! global_relay remove-profile "$DATA_FILE" "$profile_id" >/dev/null; then rollback_change; return 1; fi
+  done < <(jq -r '.[].profile_id | select(type=="string" and length>0)' <<< "$profiles")
   finish_change || return 1
-  ok "已删除全部 $count 条 Global 家宽线路；共享公共参数及其他线路保持不变。"
+  ok "已删除全部 $count 条 Global 家宽线路和 $profile_count 组公共参数；其他线路保持不变。"
 }
 global_edit_profile(){
   local id profile_file name server public_port sni fingerprint flow public_key short_id network security confirm
@@ -1247,7 +1259,7 @@ global_menu(){
     echo '7）检查 Global 线路连接状态'
     echo '8）修改 Global 公共参数'
     echo '9）批量删除 Global 家宽线路'
-    echo '10）删除全部 Global 家宽线路（保留公共参数）'
+    echo '10）删除全部 Global 家宽线路和公共参数'
     echo '0）返回'
     read -r -p '请选择：' action
     case "$action" in
