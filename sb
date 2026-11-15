@@ -3,7 +3,7 @@ set -Eeuo pipefail
 export LANG=C.UTF-8
 
 REPO_RAW="https://raw.githubusercontent.com/Berry-Blog/Berry-Blog-sg-jp-singbox-relay/main"
-SB_VERSION="2026-11-15-global-home-2"
+SB_VERSION="2026-11-15-global-home-3"
 CONFIG_DIR="/etc/sing-box"
 DATA_FILE="$CONFIG_DIR/relay.json"
 CONFIG_FILE="$CONFIG_DIR/config.json"
@@ -53,6 +53,7 @@ migrate_legacy_data(){
   tmp="$(mktemp "$CONFIG_DIR/relay.json.migrate.XXXXXX")"
   jq '
     .schema_version=5
+    | .deployment_mode=(.deployment_mode // "relay")
     | .entrance_name=(.entrance_name // "狗妈")
     | .direct_name=(.direct_name // "狗妈直出")
     | .jp_name=(.jp_name // "日本 BIGLOBE")
@@ -768,6 +769,30 @@ set_default_line(){
   finish_change
   ok "默认出站已设置为 $id。"
 }
+change_line_ip(){
+  need_data
+  local current host old_data snapshot
+  current="$(get public_host)"
+  host="$(ask_value '线路连接公网IP/DDNS域名' "$current")"
+  valid_host "$host" || { warn "IP 或域名格式无效，线路地址未修改。"; return 1; }
+  [[ "$host" != "$current" ]] || { info "线路连接地址未变化。"; return 0; }
+  snapshot="$(backup_state "修改线路IP前")"
+  old_data="$(mktemp)"
+  cp -p "$DATA_FILE" "$old_data"
+  set_string public_host "$host"
+  if ! write_exports; then
+    cp -p "$old_data" "$DATA_FILE"
+    rm -f "$old_data"
+    write_exports || true
+    warn "导出文件刷新失败，已恢复原线路地址；备份：$snapshot"
+    return 1
+  fi
+  rm -f "$old_data"
+  ok "线路连接地址已更新。无需重装或重启；UUID、Reality密钥、端口和落地参数均未改变。"
+  printf '修改前备份：%s\n' "$snapshot"
+  show_links
+}
+
 entrance_settings(){
   need_data
   local name host public_port listen_address listen_port sni
@@ -1180,22 +1205,16 @@ line_manager_menu(){
 apply_dual_nodes(){
   need_data
   [[ -x "$BIN" ]] || die "未找到 sing-box 核心程序。"
-  if [[ -n "$(get direct_uuid)" ]]; then
-    info "将重新生成全部线路配置，保留所有现有线路认证参数。"
-  else
-    info "应用全部线路配置；不会自动重新生成现有线路 UUID 或 Reality 密钥。"
-  fi
-  begin_change "应用双节点配置前"
+  info "将重新生成全部已启用线路的配置，保留现有 UUID、Reality 密钥、Short ID 和落地认证参数。"
+  begin_change "应用全部线路配置前"
   ensure_direct_uuid
   if ! render_apply; then rollback_change; return 1; fi
   if ! rc-service sing-box restart; then rollback_change; return 1; fi
   rm -f "$CHANGE_OLD_DATA" "$CHANGE_OLD_CONFIG"
   write_exports
-  ok "当前全部线路配置已应用。"
-  printf '节点 A（新加坡直出）UUID：%s\n' "$(get direct_uuid)"
-  printf '节点 B（日本 BIGLOBE 出口）UUID：%s\n' "$(get inbound_uuid)"
-  printf '新增落地机：%s 台\n' "$(jq -r '(.extra_exits // []) | length' "$DATA_FILE")"
-  printf '原有日本中转节点 UUID、Reality Private Key、Public Key、Short ID 均已保留。\n'
+  ok "全部已启用线路配置已应用。"
+  printf '当前默认出站：%s\n' "$(get default_exit)"
+  printf '启用线路：%s 条\n' "$(line_array | jq 'length')"
   printf '修改前备份：%s\n' "$CHANGE_SNAPSHOT"
   show_links
 }
@@ -1205,6 +1224,7 @@ rotate_direct_uuid(){
   valid_uuid "$uuid" || die "生成 UUID 失败。"
   begin_change "重新生成新加坡直出UUID前"
   set_string direct_uuid "$uuid"
+  if [[ "$(get deployment_mode)" == "direct" ]]; then set_string inbound_uuid "$uuid"; fi
   finish_change
   ok "新加坡直出节点 UUID 已更新；日本中转节点不受影响。"
   show_links
@@ -1446,9 +1466,105 @@ subscription_disable(){
   mv -f "$tmp" "$DATA_FILE"
   ok "本地订阅服务已关闭；VLESS 节点和 sing-box 主服务不受影响。"
 }
-setup(){
+setup_direct(){
   need_root
-  [[ ! -s "$DATA_FILE" ]] || die "检测到已有 relay.json，请勿覆盖现有配置。"
+  if [[ -s "$DATA_FILE" ]]; then
+    warn "检测到已有配置；本机基础配置不会覆盖现有线路。"
+    return 0
+  fi
+  [[ -x "$BIN" ]] || die "未找到 sing-box 核心，请先运行安装程序。"
+  mkdir -p "$CONFIG_DIR" "$EXPORT_DIR" "$BACKUP_ROOT"
+  chmod 700 "$CONFIG_DIR" "$EXPORT_DIR" "$BACKUP_ROOT"
+
+  local entrance_name direct_name public_host public_port listen_address listen_port inbound_sni
+  local detected_host keys private public sid direct_uuid
+  entrance_name="$(ask_value '本机入口名称' '本机直出')"
+  direct_name="$(ask_value '直出线路名称' '本机直出')"
+  detected_host="$(curl -4fsS --connect-timeout 5 --max-time 8 https://api.ipify.org 2>/dev/null | tr -d '[:space:]' || true)"
+  if [[ -n "$detected_host" ]]; then
+    public_host="$(ask_value '客户端连接公网IP/DDNS域名（回车使用自动检测值）' "$detected_host")"
+  else
+    public_host="$(ask_value '客户端连接公网IP/DDNS域名（请手动填写）' '')"
+  fi
+  public_port="$(ask_port '客户端连接公网映射端口' '30010')"
+  listen_address="$(ask_value '本机监听地址' '0.0.0.0')"
+  listen_port="$(ask_port '本机监听端口' '10010')"
+  inbound_sni="$(ask_value 'Reality SNI/握手域名' 'addons.mozilla.org')"
+  valid_host "$public_host" && valid_host "$listen_address" && valid_host "$inbound_sni" || die "IP、域名或 SNI 格式无效。"
+  if netstat -lnt 2>/dev/null | awk -v p="$listen_port" '$4 ~ (":" p "$") { found=1 } END { exit !found }'; then
+    die "本机监听端口已被占用。"
+  fi
+
+  keys="$("$BIN" generate reality-keypair)"
+  private="$(printf '%s\n' "$keys" | awk -F': ' '/^PrivateKey:/ {print $2}')"
+  public="$(printf '%s\n' "$keys" | awk -F': ' '/^PublicKey:/ {print $2}')"
+  sid="$("$BIN" generate rand 8 --hex)"
+  direct_uuid="$("$BIN" generate uuid)"
+  valid_uuid "$direct_uuid" || die "生成直出 UUID 失败。"
+  [[ -n "$private" && -n "$public" && -n "$sid" ]] || die "生成 Reality 密钥失败。"
+
+  jq -n \
+    --arg public_host "$public_host" --argjson public_port "$public_port" \
+    --arg listen_address "$listen_address" --argjson listen_port "$listen_port" \
+    --arg inbound_uuid "$direct_uuid" --arg direct_uuid "$direct_uuid" \
+    --arg inbound_private_key "$private" --arg inbound_public_key "$public" \
+    --arg inbound_short_id "$sid" --arg inbound_sni "$inbound_sni" \
+    --arg inbound_handshake "$inbound_sni" \
+    --arg entrance_name "$entrance_name" --arg direct_name "$direct_name" \
+    --arg jp_sni "$inbound_sni" '
+    {
+      schema_version:5,mode:"reality",deployment_mode:"direct",
+      extra_exits:[],global_profiles:[],global_exits:[],
+      entrance_name:$entrance_name,direct_name:$direct_name,jp_name:"日本 BIGLOBE",
+      direct_enabled:true,jp_enabled:false,default_exit:"direct",
+      public_host:$public_host,public_port:$public_port,
+      listen_address:$listen_address,listen_port:$listen_port,
+      inbound_uuid:$inbound_uuid,direct_uuid:$direct_uuid,
+      inbound_private_key:$inbound_private_key,inbound_public_key:$inbound_public_key,
+      inbound_short_id:$inbound_short_id,inbound_sni:$inbound_sni,inbound_handshake:$inbound_handshake,
+      jp_host:"",jp_port:30001,jp_uuid:"",jp_public_key:"",jp_short_id:"",jp_sni:$jp_sni,
+      jp_ss_port:30003,jp_ss_listen_address:"",jp_ss_listen_port:8388,
+      jp_ss_method:"2022-blake3-aes-128-gcm",jp_ss_password:""
+    }' > "$DATA_FILE"
+  chmod 600 "$DATA_FILE"
+  render_config > "$CONFIG_FILE.tmp"
+  chmod 600 "$CONFIG_FILE.tmp"
+  if ! "$BIN" check -c "$CONFIG_FILE.tmp"; then
+    rm -f "$CONFIG_FILE.tmp" "$DATA_FILE"
+    die "本机直出配置校验失败，服务尚未启动。"
+  fi
+  mv -f "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+  cat > "$SERVICE_FILE" <<'OPENRC'
+#!/sbin/openrc-run
+name="sing-box"
+description="sing-box 本机 Reality 直出"
+command="/usr/local/bin/sing-box"
+command_args="run -c /etc/sing-box/config.json"
+command_background="yes"
+pidfile="/run/sing-box.pid"
+supervisor=supervise-daemon
+supervise_daemon_args="--respawn-max 0 --respawn-delay 5"
+output_log="/var/log/sing-box.log"
+error_log="/var/log/sing-box.err"
+depend() { need net; }
+start_pre() {
+  checkpath --directory --mode 0755 /var/log
+  checkpath --directory --mode 0755 /run
+}
+OPENRC
+  chmod 755 "$SERVICE_FILE"
+  rc-update add sing-box default
+  rc-service sing-box start || die "sing-box 启动失败，请检查 /var/log/sing-box.err。"
+  write_exports
+  ok "本机基础部署完成：VLESS Reality 入口使用本机直出。"
+  show_info
+  show_credentials
+  show_links
+}
+
+setup_relay(){
+  need_root
+  if [[ -s "$DATA_FILE" ]]; then warn "检测到已有配置，不能覆盖；请使用线路管理修改现有配置。"; return 0; fi
   mkdir -p "$CONFIG_DIR" "$EXPORT_DIR" "$BACKUP_ROOT"
   chmod 700 "$CONFIG_DIR" "$EXPORT_DIR" "$BACKUP_ROOT"
   local entrance_name direct_name jp_name public_host public_port listen_address listen_port inbound_sni jp_host jp_port jp_sni
@@ -1492,7 +1608,7 @@ setup(){
     --arg jp_public_key "$jp_public" --arg jp_short_id "$jp_short" --arg jp_sni "$jp_sni" \
     --arg entrance_name "$entrance_name" --arg direct_name "$direct_name" --arg jp_name "$jp_name" '
     {
-      schema_version:5,mode:"reality",extra_exits:[],global_profiles:[],global_exits:[],
+      schema_version:5,mode:"reality",deployment_mode:"relay",extra_exits:[],global_profiles:[],global_exits:[],
       entrance_name:$entrance_name,direct_name:$direct_name,jp_name:$jp_name,
       direct_enabled:true,jp_enabled:true,default_exit:"jp",
       public_host:$public_host,public_port:$public_port,
@@ -1540,6 +1656,52 @@ OPENRC
   show_credentials
   show_links
 }
+uninstall_singbox(){
+  need_root
+  echo "1）卸载程序和服务，保留配置（会先创建备份）"
+  echo "2）完全卸载程序、服务和配置，保留历史备份（会先创建备份）"
+  echo "3）彻底卸载并删除所有配置和历史备份，不创建备份"
+  echo "0）取消"
+  read -r -p "请选择： " uninstall_choice
+  case "$uninstall_choice" in
+    1|2)
+      local snapshot
+      snapshot="$(backup_state "卸载前备份")"
+      ;;
+    3)
+      warn "这会删除配置、订阅文件、Global线路数据和全部历史备份，且不会创建新备份。"
+      read -r -p '确认彻底卸载？输入 DELETE 继续：' confirm
+      [[ "$confirm" == "DELETE" ]] || { info "已取消；没有删除文件。"; return 0; }
+      ;;
+    0) info "已取消。"; return 0 ;;
+    *) warn "无效选项。"; return 0 ;;
+  esac
+
+  rc-service sing-box stop 2>/dev/null || true
+  rc-update del sing-box default 2>/dev/null || true
+  rc-service sb-subscription stop 2>/dev/null || true
+  rc-update del sb-subscription default 2>/dev/null || true
+  rm -f "$SERVICE_FILE" "$SUB_SERVICE" /etc/conf.d/sing-box
+  rm -f /usr/local/bin/sb /usr/bin/sb "$BIN" /usr/bin/sing-box
+  case "$uninstall_choice" in
+    1)
+      ok "sing-box 程序和服务已卸载，配置保留。卸载前备份：$snapshot"
+      ;;
+    2)
+      rm -rf "$CONFIG_DIR" "$SUB_ROOT" /usr/local/libexec/sb
+      rm -f /var/log/sing-box.log /var/log/sing-box.err /var/log/sb-subscription.log /var/log/sb-subscription.err
+      ok "sing-box 程序、服务和配置已完全卸载；历史备份保留。卸载前备份：$snapshot"
+      ;;
+    3)
+      rm -rf "$CONFIG_DIR" "$SUB_ROOT" "$BACKUP_ROOT" /usr/local/libexec/sb
+      rm -f /var/log/sing-box.log /var/log/sing-box.err /var/log/sb-subscription.log /var/log/sb-subscription.err
+      rm -f /root/deploy-sg-reality.sh /root/finish-sg-reality.sh
+      ok "sing-box 已彻底卸载；配置和历史备份已删除，未创建新备份。"
+      ;;
+  esac
+  exit 0
+}
+
 menu(){
   need_root
   while true; do
@@ -1552,98 +1714,90 @@ menu(){
         "$(get entrance_name)" "$(get public_host)" "$(get public_port)" "$(get listen_address)" "$(get listen_port)"
       printf '启用线路：%s | 默认出站：%s | 版本：%s\n' \
         "$(line_array | jq 'length')" "$(get default_exit)" "$SB_VERSION"
-    else
-      echo "尚未初始化"
-    fi
-    cat <<'MENU'
- 1）线路总览（名称、协议、服务器 IP、端口）
- 2）显示全部线路认证参数
- 3）显示全部 VLESS 一键导入链接
- 4）导出 Clash Meta / Mihomo 配置文件
- 5）启用 Clash 远程订阅服务（HTTPS，需配置反向代理）
- 6）查看当前 Clash 订阅链接
- 7）重新生成订阅访问令牌
- 8）关闭 Clash 订阅服务
- 9）应用/修复全部线路配置
-10）统一线路管理（添加、修改、删除、设置默认出站）
-11）狗妈入口设置（名称、IP、映射端口、监听端口、SNI）
-12）检查 sing-box 配置
-13）启动 / 停止 / 重启 sing-box
-14）查看服务状态、监听端口
-15）查看最近日志
-16）备份当前配置
-17）恢复历史备份
-18）更新 sb 管理脚本（从 GitHub 拉取最新版）
-19）更新 sing-box 核心
-20）卸载 sing-box
-21）Global 多家宽管理
+      cat <<'MENU'
+ 1）初始化部署本机基础配置（VLESS Reality直出）
+ 2）初始化部署狗妈中转配置
+ 3）修改线路连接IP/DDNS
+ 4）线路总览（名称、协议、服务器 IP、端口）
+ 5）显示全部线路认证参数
+ 6）显示全部 VLESS 一键导入链接
+ 7）导出 Clash Meta / Mihomo 配置文件
+ 8）启用 Clash 远程订阅服务（HTTPS，需配置反向代理）
+ 9）查看当前 Clash 订阅链接
+10）重新生成订阅访问令牌
+11）关闭 Clash 订阅服务
+12）应用/修复全部线路配置
+13）统一线路管理（添加、修改、删除、设置默认出站）
+14）狗妈入口设置（名称、IP、映射端口、监听端口、SNI）
+15）检查 sing-box 配置
+16）启动 / 停止 / 重启 sing-box
+17）查看服务状态、监听端口
+18）查看最近日志
+19）备份当前配置
+20）恢复历史备份
+21）更新 sb 管理脚本（从 GitHub 拉取最新版）
+22）更新 sing-box 核心
+23）卸载 sing-box
+24）Global 多家宽管理
  0）退出
 MENU
+    else
+      echo "尚未初始化，请先选择部署方式："
+      cat <<'MENU'
+ 1）初始化部署本机基础配置（VLESS Reality直出）
+ 2）初始化部署狗妈中转配置
+ 0）退出
+MENU
+    fi
     echo
     read -r -p "请输入功能编号： " choice
-    case "$choice" in
-      1) show_info ;;
-      2) show_credentials ;;
-      3) show_links ;;
-      4) show_clash ;;
-      5) subscription_enable ;;
-      6) subscription_show ;;
-      7) subscription_rotate ;;
-      8) subscription_disable ;;
-      9) apply_dual_nodes ;;
-      10) line_manager_menu ;;
-      11) entrance_settings ;;
-      12) config_check ;;
-      13)
-        echo "1）启动  2）停止  3）重启"
-        read -r -p "请选择： " action
-        case "$action" in
-          1) rc-service sing-box start ;;
-          2) rc-service sing-box stop ;;
-          3) rc-service sing-box restart ;;
-          *) warn "无效选项。" ;;
-        esac
-        ;;
-      14) service_status ;;
-      15)
-        echo "========== sing-box 错误日志 =========="
-        tail -n 80 /var/log/sing-box.err 2>/dev/null || true
-        echo
-        echo "========== sing-box 运行日志 =========="
-        tail -n 80 /var/log/sing-box.log 2>/dev/null || true
-        ;;
-      16) backup_menu ;;
-      17) restore_menu ;;
-      18) update_manager ;;
-      19) update_core ;;
-      20)
-        echo "1）卸载程序和服务，保留配置"
-        echo "2）完全卸载程序、服务和配置（历史备份保留）"
-        echo "0）取消"
-        read -r -p "请选择： " uninstall_choice
-        case "$uninstall_choice" in
-          1|2)
-            local snapshot
-            snapshot="$(backup_state "卸载前备份")"
-            rc-service sing-box stop 2>/dev/null || true
-            rc-update del sing-box default 2>/dev/null || true
-            rc-service sb-subscription stop 2>/dev/null || true
-            rc-update del sb-subscription default 2>/dev/null || true
-            rm -f "$SERVICE_FILE" "$SUB_SERVICE" /usr/local/bin/sb /usr/bin/sb "$BIN"
-            if [[ "$uninstall_choice" == "2" ]]; then
-              rm -rf "$CONFIG_DIR" "$SUB_ROOT"
-              rm -f /var/log/sing-box.log /var/log/sing-box.err /var/log/sb-subscription.log /var/log/sb-subscription.err
-            fi
-            ok "卸载完成。卸载前备份：$snapshot"
-            exit 0
-            ;;
-          *) info "已取消。" ;;
-        esac
-        ;;
-      21) global_menu ;;
-      0) exit 0 ;;
-      *) warn "无效选项，请重新输入。" ;;
-    esac
+    if [[ ! -s "$DATA_FILE" && ! "$choice" =~ ^(0|1|2)$ ]]; then
+      warn "尚未初始化；请先选择功能 1 或 2。"
+    else
+      case "$choice" in
+        1) setup_direct ;;
+        2) setup_relay ;;
+        3) change_line_ip ;;
+        4) show_info ;;
+        5) show_credentials ;;
+        6) show_links ;;
+        7) show_clash ;;
+        8) subscription_enable ;;
+        9) subscription_show ;;
+        10) subscription_rotate ;;
+        11) subscription_disable ;;
+        12) apply_dual_nodes ;;
+        13) line_manager_menu ;;
+        14) entrance_settings ;;
+        15) config_check ;;
+        16)
+          echo "1）启动  2）停止  3）重启"
+          read -r -p "请选择： " action
+          case "$action" in
+            1) rc-service sing-box start ;;
+            2) rc-service sing-box stop ;;
+            3) rc-service sing-box restart ;;
+            *) warn "无效选项。" ;;
+          esac
+          ;;
+        17) service_status ;;
+        18)
+          echo "========== sing-box 错误日志 =========="
+          tail -n 80 /var/log/sing-box.err 2>/dev/null || true
+          echo
+          echo "========== sing-box 运行日志 =========="
+          tail -n 80 /var/log/sing-box.log 2>/dev/null || true
+          ;;
+        19) backup_menu ;;
+        20) restore_menu ;;
+        21) update_manager ;;
+        22) update_core ;;
+        23) uninstall_singbox ;;
+        24) global_menu ;;
+        0) exit 0 ;;
+        *) warn "无效选项，请重新输入。" ;;
+      esac
+    fi
     echo
     read -r -p "按回车返回管理菜单..." _
   done
@@ -1657,7 +1811,9 @@ migrate_legacy_data
 cmd="menu"
 [[ $# -eq 0 ]] || cmd="$1"
 case "$cmd" in
-  setup) setup ;;
+  setup) menu ;;
+  setup-direct) setup_direct ;;
+  setup-relay) setup_relay ;;
   menu) menu ;;
   status) service_status ;;
   links|node) show_links ;;
@@ -1665,6 +1821,6 @@ case "$cmd" in
   check) config_check ;;
   update) update_manager ;;
   version) printf '%s\n' "$SB_VERSION" ;;
-  *) echo "用法：sb [menu|setup|status|links|clash|check|update|version]"; exit 2 ;;
+  *) echo "用法：sb [menu|setup|setup-direct|setup-relay|status|links|clash|check|update|version]"; exit 2 ;;
 esac
 
